@@ -1,6 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
+  import { open } from "@tauri-apps/plugin-dialog";
   import { onMount } from "svelte";
   import Markdown from '$lib/Markdown.svelte';
   import ThinkingBlock from '$lib/ThinkingBlock.svelte';
@@ -12,7 +13,10 @@
     Send, 
     Plus,
     MessageSquare,
-    Trash2
+    Trash2,
+    Paperclip,
+    FileText,
+    Loader2
   } from '@lucide/svelte';
 
   type Message = {
@@ -36,6 +40,11 @@
   // Sessions State
   let sessions = $state<ChatSession[]>([]);
   let currentSessionId = $state<string>("");
+
+  // RAG Indexing State
+  let isIndexing = $state(false);
+  let indexedFiles = $state<string[]>([]);
+  let ragStatusMsg = $state("");
 
   let isGenerating = $state(false);
   let isSidebarOpen = $state(false);
@@ -64,7 +73,7 @@
     }, 50);
   }
 
-  // Load / Save Sessions vào localStorage
+  // Load Sessions từ Rust Persistence File
   async function loadSessions() {
     try {
       const savedSessions = await invoke<ChatSession[]>("load_sessions");
@@ -127,6 +136,45 @@
     return { thinking, answer };
   }
 
+  // Chọn và Index file tài liệu vào RAG Engine
+  async function handlePickAndIndexFile() {
+    try {
+      const selected = await open({
+        multiple: false,
+        filters: [{
+          name: 'Documents & Code',
+          extensions: ['txt', 'md', 'rs', 'py', 'c', 'cpp', 'js', 'ts', 'json']
+        }]
+      });
+
+      if (selected && typeof selected === 'string') {
+        isIndexing = true;
+        ragStatusMsg = "Đang tạo Vector Embeddings cho file...";
+        
+        // Gọi Rust backend index file
+        const res = await invoke<string>("index_document_command", {
+          baseUrl,
+          apiKey,
+          filePath: selected
+        });
+
+        const fileName = selected.split(/[/\\]/).pop() || selected;
+        if (!indexedFiles.includes(fileName)) {
+          indexedFiles = [...indexedFiles, fileName];
+        }
+
+        ragStatusMsg = res;
+        setTimeout(() => ragStatusMsg = "", 4000);
+      }
+    } catch (err) {
+      console.error("Indexing error:", err);
+      ragStatusMsg = `[Lỗi Index File]: ${err}`;
+      setTimeout(() => ragStatusMsg = "", 4000);
+    } finally {
+      isIndexing = false;
+    }
+  }
+
   onMount(() => {
     loadSessions();
 
@@ -169,12 +217,10 @@
 
     const currentSess = sessions[sessionIndex];
 
-    // Cập nhật Tên Session nếu đây là tin nhắn đầu tiên
     if (currentSess.messages.length === 0) {
       currentSess.title = userText.slice(0, 30) + (userText.length > 30 ? "..." : "");
     }
 
-    // Push tin nhắn User + Assistant trống
     currentSess.messages.push({ role: "user", content: userText });
     currentSess.messages.push({ role: "assistant", content: "" });
     currentSess.updatedAt = Date.now();
@@ -183,7 +229,7 @@
     isGenerating = true;
     scrollToBottom();
 
-    // Lọc bỏ bớt tag <think>...</think> ở các tin nhắn cũ trước khi gửi context cho LLM
+    // Lọc bỏ bớt tag <think>...</think> ở các tin nhắn cũ
     const cleanContextMessages = currentSess.messages.slice(0, -1).map(m => {
       if (m.role === "assistant") {
         const parsed = parseThinking(m.content);
@@ -252,7 +298,7 @@
     </button>
 
     <!-- Sessions List (History) -->
-    <div class="flex flex-col gap-1 overflow-y-auto max-h-48 border-b border-zinc-800/60 pb-3 pr-1">
+    <div class="flex flex-col gap-1 overflow-y-auto max-h-40 border-b border-zinc-800/60 pb-3 pr-1">
       <span class="text-[10px] font-semibold text-zinc-500 tracking-wider uppercase px-1 mb-1">Lịch sử Chat</span>
       {#each sessions as s (s.id)}
         <div 
@@ -279,7 +325,7 @@
     </div>
 
     <!-- Provider Config Controls -->
-    <div class="flex flex-col gap-3.5 overflow-y-auto flex-1 pr-1 pt-1">
+    <div class="flex flex-col gap-3 overflow-y-auto flex-1 pr-1 pt-1">
       <div class="flex flex-col gap-1">
         <label for="provider-select" class="text-[10px] font-semibold text-zinc-400 tracking-wider uppercase">Provider</label>
         <div class="relative">
@@ -365,8 +411,8 @@
           <div class="w-12 h-12 mb-4 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400 text-xl">
             ✦
           </div>
-          <p class="text-sm font-semibold text-zinc-300">NekkoChat Session Ready</p>
-          <p class="text-xs text-zinc-500 max-w-xs mt-1 leading-relaxed">Hỏi câu đầu tiên để khởi tạo chủ đề chat nhé mày!</p>
+          <p class="text-sm font-semibold text-zinc-300">NekkoChat Ready</p>
+          <p class="text-xs text-zinc-500 max-w-xs mt-1 leading-relaxed">Ném file code/tài liệu vào để kích hoạt RAG Vector Search hoặc đặt câu hỏi ngay!</p>
         </div>
       {/if}
 
@@ -406,27 +452,66 @@
       {/each}
     </div>
 
-    <!-- Floating Input Box -->
+    <!-- Floating Input Box & RAG File Indexer -->
     <div class="p-4 md:p-6 bg-gradient-to-t from-[#0e0f12] via-[#0e0f12]/90 to-transparent shrink-0">
-      <form 
-        onsubmit={(e) => { e.preventDefault(); sendMessage(); }} 
-        class="max-w-3xl mx-auto relative flex items-center bg-[#181b22] border border-zinc-800/80 rounded-2xl shadow-xl shadow-black/40 focus-within:border-emerald-500/50 focus-within:ring-1 focus-within:ring-emerald-500/20 transition-all p-1.5"
-      >
-        <input
-          type="text"
-          bind:value={inputPrompt}
-          disabled={isGenerating}
-          placeholder={isGenerating ? "AI đang trả lời..." : "Hỏi bất cứ điều gì..."}
-          class="w-full bg-transparent px-4 py-2.5 text-xs md:text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none disabled:opacity-50"
-        />
-        <button
-          type="submit"
-          disabled={isGenerating || !inputPrompt.trim()}
-          class="bg-emerald-500 hover:bg-emerald-400 disabled:bg-zinc-800/50 disabled:text-zinc-600 text-zinc-950 font-bold px-4 py-2.5 rounded-xl text-xs transition-all shrink-0 cursor-pointer disabled:cursor-not-allowed flex items-center justify-center"
+      <div class="max-w-3xl mx-auto flex flex-col gap-2">
+        <!-- RAG Indexed Files & Status Badge -->
+        {#if indexedFiles.length > 0 || ragStatusMsg}
+          <div class="flex items-center gap-2 overflow-x-auto py-1 px-1 text-xs">
+            {#if ragStatusMsg}
+              <span class="text-[11px] text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 px-2.5 py-1 rounded-lg flex items-center gap-1.5 font-mono">
+                {#if isIndexing}
+                  <Loader2 class="w-3 h-3 animate-spin" />
+                {/if}
+                {ragStatusMsg}
+              </span>
+            {/if}
+
+            {#each indexedFiles as file}
+              <span class="text-[11px] text-zinc-300 bg-zinc-800/80 border border-zinc-700/50 px-2.5 py-0.5 rounded-lg flex items-center gap-1.5 font-mono">
+                <FileText class="w-3 h-3 text-emerald-400" />
+                <span>{file}</span>
+              </span>
+            {/each}
+          </div>
+        {/if}
+
+        <form 
+          onsubmit={(e) => { e.preventDefault(); sendMessage(); }} 
+          class="relative flex items-center bg-[#181b22] border border-zinc-800/80 rounded-2xl shadow-xl shadow-black/40 focus-within:border-emerald-500/50 focus-within:ring-1 focus-within:ring-emerald-500/20 transition-all p-1.5 gap-2"
         >
-          <Send class="w-4 h-4" />
-        </button>
-      </form>
+          <!-- Nút chọn File Index RAG -->
+          <button
+            type="button"
+            onclick={handlePickAndIndexFile}
+            disabled={isIndexing || isGenerating}
+            title="Đính kèm file tài liệu / source code cho RAG Vector Search"
+            class="p-2.5 text-zinc-400 hover:text-emerald-400 hover:bg-zinc-800/60 rounded-xl transition-all shrink-0 disabled:opacity-50 cursor-pointer"
+          >
+            {#if isIndexing}
+              <Loader2 class="w-4 h-4 animate-spin text-emerald-400" />
+            {:else}
+              <Paperclip class="w-4 h-4" />
+            {/if}
+          </button>
+
+          <input
+            type="text"
+            bind:value={inputPrompt}
+            disabled={isGenerating}
+            placeholder={isGenerating ? "AI đang trả lời..." : "Hỏi bất cứ điều gì hoặc nhờ phân tích tài liệu đã đính kèm..."}
+            class="w-full bg-transparent px-2 py-2.5 text-xs md:text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none disabled:opacity-50"
+          />
+
+          <button
+            type="submit"
+            disabled={isGenerating || !inputPrompt.trim()}
+            class="bg-emerald-500 hover:bg-emerald-400 disabled:bg-zinc-800/50 disabled:text-zinc-600 text-zinc-950 font-bold px-4 py-2.5 rounded-xl text-xs transition-all shrink-0 cursor-pointer disabled:cursor-not-allowed flex items-center justify-center"
+          >
+            <Send class="w-4 h-4" />
+          </button>
+        </form>
+      </div>
     </div>
   </main>
 </div>
