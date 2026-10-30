@@ -3,13 +3,22 @@
   import { listen } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
 
+  import { 
+    X, 
+    Menu, 
+    ChevronDown, 
+    Send, 
+    Sparkles, 
+    Bot 
+  } from '@lucide/svelte';
+
   type Message = {
     role: "user" | "assistant" | "system";
     content: string;
   };
 
-  let provider = $state("ollama"); // "ollama" | "openai" | "anthropic"
-  let baseUrl = $state("http://localhost:11434");
+  let provider = $state("openai"); // "ollama" | "openai" | "anthropic"
+  let baseUrl = $state("http://localhost:11434/v1");
   let apiKey = $state("");
   let selectedModel = $state("llama3.2");
   let inputPrompt = $state("");
@@ -19,7 +28,7 @@
 
   let chatContainer: HTMLDivElement;
 
-  // Tự động set Base URL mặc định khi đổi Provider
+  // Set default baseURL when change provider
   $effect(() => {
     if (provider === "ollama") {
       baseUrl = "http://localhost:11434";
@@ -36,22 +45,27 @@
     }, 50);
   }
 
-  onMount(async () => {
-    const unlistenChunk = await listen<string>("chat-chunk", (event) => {
-      if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
-        messages[messages.length - 1].content += event.payload;
-      }
-      scrollToBottom();
-    });
+  onMount(() => {
+    let unlistenChunk: (() => void) | undefined;
+    let unlistenDone: (() => void) | undefined;
 
-    const unlistenDone = await listen("chat-done", () => {
-      isGenerating = false;
-    });
+    (async () => {
+      const unlistenChunk = await listen<string>("chat-chunk", (event) => {
+        if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
+          messages[messages.length - 1].content += event.payload;
+        }
+        scrollToBottom();
+      });
 
-    return () => {
-      unlistenChunk();
-      unlistenDone();
-    };
+      const unlistenDone = await listen("chat-done", () => {
+        isGenerating = false;
+      });
+
+      return () => {
+        if (unlistenChunk) unlistenChunk();
+        if (unlistenDone) unlistenDone();
+      };
+    })
   });
 
   async function sendMessage() {
@@ -81,7 +95,7 @@
       });
     } catch (err) {
       console.error(err);
-      messages[messages.length - 1].content = `[Lỗi]: ${err}`;
+      messages[messages.length - 1].content = `[ERROR]: ${err}`;
       isGenerating = false;
     }
   }
@@ -108,13 +122,13 @@
         <div class="w-7 h-7 rounded-lg bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 font-bold text-sm">
           N
         </div>
-        <h2 class="text-base font-bold tracking-tight text-zinc-100">nekkochat</h2>
+        <h2 class="text-base font-bold tracking-tight text-zinc-100">NekkoChat</h2>
       </div>
       <button 
         onclick={() => isSidebarOpen = false} 
         class="md:hidden text-zinc-400 hover:text-zinc-100 p-1"
       >
-        ✕
+        <X class="w-5 h-5" />
       </button>
     </div>
 
@@ -133,7 +147,7 @@
             <option value="anthropic" class="bg-[#1a1d24] text-zinc-100">Anthropic Compatible</option>
           </select>
           <div class="pointer-events-none absolute inset-y-0 right-0 flex items-center px-3 text-zinc-400 text-xs">
-            ▼
+            <ChevronDown class="w-4 h-4" />
           </div>
         </div>
       </div>
@@ -178,7 +192,7 @@
     </div>
 
     <div class="pt-3 border-t border-zinc-800/40 text-[10px] text-zinc-600 text-center font-mono">
-      Tauri v2 • Svelte 5
+      NOTE: AI-generated responses may be inaccurate. Please verify any information you receive!
     </div>
   </aside>
 
@@ -191,7 +205,7 @@
           onclick={() => isSidebarOpen = true} 
           class="md:hidden text-zinc-400 hover:text-white p-1.5 rounded-lg bg-zinc-800/40"
         >
-          ☰
+          <Menu class="w-5 h-5" />
         </button>
         <div class="flex items-center gap-2">
           <span class="w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]"></span>
@@ -210,8 +224,8 @@
           <div class="w-12 h-12 mb-4 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400 text-xl">
             ✦
           </div>
-          <p class="text-sm font-semibold text-zinc-300">NekkoChat Online</p>
-          <p class="text-xs text-zinc-500 max-w-xs mt-1 leading-relaxed">Sẵn sàng nhận lệnh. Chọn model bên sidebar rồi gõ câu hỏi thôi mày.</p>
+          <p class="text-sm font-semibold text-zinc-300">NekkoChat</p>
+          <p class="text-xs text-zinc-500 max-w-xs mt-1 leading-relaxed">I’m ready to help! What would you like to do today?</p>
         </div>
       {/if}
 
@@ -248,7 +262,7 @@
           type="text"
           bind:value={inputPrompt}
           disabled={isGenerating}
-          placeholder={isGenerating ? "AI đang trả lời..." : "Hỏi bất cứ điều gì..."}
+          placeholder={isGenerating ? "Responding..." : "Ask anything..."}
           class="w-full bg-transparent px-4 py-2.5 text-xs md:text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none disabled:opacity-50"
         />
         <button
@@ -256,7 +270,7 @@
           disabled={isGenerating || !inputPrompt.trim()}
           class="bg-emerald-500 hover:bg-emerald-400 disabled:bg-zinc-800/50 disabled:text-zinc-600 text-zinc-950 font-bold px-4 py-2.5 rounded-xl text-xs transition-all shrink-0 cursor-pointer disabled:cursor-not-allowed"
         >
-          Gửi
+           <Send class="w-4 h-4" />
         </button>
       </form>
     </div>

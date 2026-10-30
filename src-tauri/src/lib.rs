@@ -13,7 +13,7 @@ async fn stream_chat_command(app: AppHandle, payload: ChatPayload) -> Result<(),
         let provider = match get_provider(&payload.provider) {
             Ok(p) => p,
             Err(e) => {
-                let _ = app.emit("chat-chunk", format!("[Lỗi]: {}", e));
+                let _ = app.emit("chat-chunk", format!("[ERROR]: {}", e));
                 let _ = app.emit("chat-done", ());
                 return;
             }
