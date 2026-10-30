@@ -8,14 +8,15 @@ use types::ChatPayload;
 use std::time::Duration;
 use tokio::time::timeout;
 
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
 async fn stream_chat_command(app: AppHandle, payload: ChatPayload) -> Result<(), String> {
+    println!("\n>>> [COMMAND RECV] Provider: {}, BaseURL: {}, Model: {}", payload.provider, payload.base_url, payload.model);
+
     tokio::spawn(async move {
-        // Guard đảm bảo LUÔN LUÔN emit "chat-done" duy nhất 1 lần khi thread kết thúc
         struct DoneGuard(AppHandle);
         impl Drop for DoneGuard {
             fn drop(&mut self) {
+                println!("<<< [THREAD DONE] Dropping guard & emitting chat-done");
                 let _ = self.0.emit("chat-done", ());
             }
         }
@@ -24,8 +25,9 @@ async fn stream_chat_command(app: AppHandle, payload: ChatPayload) -> Result<(),
         let provider = match get_provider(&payload.provider) {
             Ok(p) => p,
             Err(e) => {
+                println!("[E] Unknown Provider: {}", e);
                 let _ = app.emit("chat-chunk", format!("[ERROR]: {}", e));
-                return; // Guard sẽ tự drop và emit chat-done
+                return;
             }
         };
 
@@ -39,7 +41,7 @@ async fn stream_chat_command(app: AppHandle, payload: ChatPayload) -> Result<(),
             .await
         {
             Ok(mut stream) => {
-                // Đặt timeout 15 giây cho MỖI chunk dữ liệu trả về
+                println!("[STREAM LOOP STARTED] Waiting for first chunk...");
                 let chunk_timeout = Duration::from_secs(15);
 
                 loop {
@@ -48,18 +50,19 @@ async fn stream_chat_command(app: AppHandle, payload: ChatPayload) -> Result<(),
                             let _ = app.emit("chat-chunk", text);
                         }
                         Ok(Some(Err(err))) => {
+                            println!("[E] Stream loop error: {}", err);
                             let _ = app.emit("chat-chunk", format!("\n[Stream Error]: {}", err));
                             break;
                         }
                         Ok(None) => {
-                            // Stream kết thúc tự nhiên từ phía server
+                            println!("[STREAM ENDED NATIVELY]");
                             break;
                         }
                         Err(_) => {
-                            // Dính Idle Timeout: Server ngâm kết nối quá 15s mà không nhả token nào
+                            println!("[E] Stream Idle Timeout (15s no data)");
                             let _ = app.emit(
                                 "chat-chunk",
-                                "\n[Timeout Error]: Server ngâm kết nối quá lâu không trả dữ liệu!",
+                                "\n[Timeout Error]: Server ngâm kết nối quá 15s đéo nhả token nào!",
                             );
                             break;
                         }
@@ -67,6 +70,7 @@ async fn stream_chat_command(app: AppHandle, payload: ChatPayload) -> Result<(),
                 }
             }
             Err(err) => {
+                println!("[E] stream_chat Returned Err: {}", err);
                 let _ = app.emit("chat-chunk", format!("[Request Error]: {}", err));
             }
         }
