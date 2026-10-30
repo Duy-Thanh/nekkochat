@@ -5,17 +5,27 @@ use futures::StreamExt;
 use providers::get_provider;
 use tauri::{AppHandle, Emitter};
 use types::ChatPayload;
+use std::time::Duration;
+use tokio::time::timeout;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
 async fn stream_chat_command(app: AppHandle, payload: ChatPayload) -> Result<(), String> {
     tokio::spawn(async move {
+        // Guard đảm bảo LUÔN LUÔN emit "chat-done" duy nhất 1 lần khi thread kết thúc
+        struct DoneGuard(AppHandle);
+        impl Drop for DoneGuard {
+            fn drop(&mut self) {
+                let _ = self.0.emit("chat-done", ());
+            }
+        }
+        let _guard = DoneGuard(app.clone());
+
         let provider = match get_provider(&payload.provider) {
             Ok(p) => p,
             Err(e) => {
                 let _ = app.emit("chat-chunk", format!("[ERROR]: {}", e));
-                let _ = app.emit("chat-done", ());
-                return;
+                return; // Guard sẽ tự drop và emit chat-done
             }
         };
 
@@ -29,23 +39,37 @@ async fn stream_chat_command(app: AppHandle, payload: ChatPayload) -> Result<(),
             .await
         {
             Ok(mut stream) => {
-                while let Some(chunk) = stream.next().await {
-                    match chunk {
-                        Ok(text) => {
+                // Đặt timeout 15 giây cho MỖI chunk dữ liệu trả về
+                let chunk_timeout = Duration::from_secs(15);
+
+                loop {
+                    match timeout(chunk_timeout, stream.next()).await {
+                        Ok(Some(Ok(text))) => {
                             let _ = app.emit("chat-chunk", text);
                         }
-                        Err(err) => {
+                        Ok(Some(Err(err))) => {
                             let _ = app.emit("chat-chunk", format!("\n[Stream Error]: {}", err));
+                            break;
+                        }
+                        Ok(None) => {
+                            // Stream kết thúc tự nhiên từ phía server
+                            break;
+                        }
+                        Err(_) => {
+                            // Dính Idle Timeout: Server ngâm kết nối quá 15s mà không nhả token nào
+                            let _ = app.emit(
+                                "chat-chunk",
+                                "\n[Timeout Error]: Server ngâm kết nối quá lâu không trả dữ liệu!",
+                            );
+                            break;
                         }
                     }
                 }
             }
             Err(err) => {
-                let _ = app.emit("chat-chunk", format!("[Error]: {}", err));
+                let _ = app.emit("chat-chunk", format!("[Request Error]: {}", err));
             }
         }
-
-        let _ = app.emit("chat-done", ());
     });
 
     Ok(())

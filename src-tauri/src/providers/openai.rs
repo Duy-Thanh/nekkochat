@@ -5,6 +5,7 @@ use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use reqwest::Client;
 use serde_json::json;
+use std::time::Duration;
 
 pub struct OpenAiProvider {
     client: Client,
@@ -12,9 +13,14 @@ pub struct OpenAiProvider {
 
 impl OpenAiProvider {
     pub fn new() -> Self {
-        Self {
-            client: Client::new(),
-        }
+        let client = Client::builder()
+                    // setup timeout
+                    .connect_timeout(Duration::from_secs(30))
+                    .timeout(Duration::from_secs(60))
+                    .build()
+                    .unwrap_or_else(|_| Client::new());
+
+        Self { client }
     }
 }
 
