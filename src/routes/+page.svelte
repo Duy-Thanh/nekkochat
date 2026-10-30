@@ -2,6 +2,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
+  import Markdown from '$lib/Markdown.svelte';
 
   import { 
     X, 
@@ -192,7 +193,7 @@
     </div>
 
     <div class="pt-3 border-t border-zinc-800/40 text-[10px] text-zinc-600 text-center font-mono">
-      NOTE: AI-generated responses may be inaccurate. Please verify any information you receive!
+      &copy; 2026 Nekkochan. All right reserved
     </div>
   </aside>
 
@@ -245,7 +246,11 @@
                 <span class="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse [animation-delay:0.4s]"></span>
               </span>
             {:else}
-              {msg.content}
+              {#if msg.role === 'assistant'}
+                <Markdown content={msg.content} />
+              {:else}
+                {msg.content}
+              {/if}
             {/if}
           </div>
         </div>
@@ -273,6 +278,10 @@
            <Send class="w-4 h-4" />
         </button>
       </form>
+
+      <div class="pt-3 border-t border-zinc-800/40 text-[11px] text-zinc-600 text-center font-mono">
+        IMPORTANT NOTE: AI-generated responses may be inaccurate. Please verify any information you receive!
+      </div>
     </div>
   </main>
 </div>
