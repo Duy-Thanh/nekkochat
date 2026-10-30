@@ -10,7 +10,9 @@
     Menu, 
     ChevronDown, 
     Send, 
-    Sparkles 
+    Plus,
+    MessageSquare,
+    Trash2
   } from '@lucide/svelte';
 
   type Message = {
@@ -18,16 +20,33 @@
     content: string;
   };
 
+  type ChatSession = {
+    id: string;
+    title: string;
+    updatedAt: number;
+    messages: Message[];
+  };
+
   let provider = $state("openai");
   let baseUrl = $state("https://integrate.api.nvidia.com/v1");
   let apiKey = $state("");
   let selectedModel = $state("nvidia/nemotron-3-ultra-550b-a55b");
   let inputPrompt = $state("");
-  let messages = $state<Message[]>([]);
+  
+  // Sessions State
+  let sessions = $state<ChatSession[]>([]);
+  let currentSessionId = $state<string>("");
+
   let isGenerating = $state(false);
   let isSidebarOpen = $state(false);
 
   let chatContainer: HTMLDivElement;
+
+  // Lấy danh sách tin nhắn của Session hiện tại
+  let currentMessages = $derived.by(() => {
+    const s = sessions.find(s => s.id === currentSessionId);
+    return s ? s.messages : [];
+  });
 
   $effect(() => {
     if (provider === "ollama") {
@@ -45,7 +64,54 @@
     }, 50);
   }
 
-  // Tách tag <think>...</think> ra khỏi nội dung trả về
+  // Load / Save Sessions vào localStorage
+  async function loadSessions() {
+    try {
+      const savedSessions = await invoke<ChatSession[]>("load_sessions");
+      if (savedSessions && savedSessions.length > 0) {
+        sessions = savedSessions;
+        currentSessionId = sessions[0].id;
+      } else {
+        createNewSession();
+      }
+    } catch (err) {
+      console.error("Lỗi load sessions từ Rust:", err);
+      createNewSession();
+    }
+  }
+
+  // Save Sessions sang Rust Persistence File
+  async function saveSessions() {
+    try {
+      await invoke("save_sessions", { sessions: $state.snapshot(sessions) });
+    } catch (err) {
+      console.error("Lỗi save sessions sang Rust:", err);
+    }
+  }
+
+  function createNewSession() {
+    const newSession: ChatSession = {
+      id: crypto.randomUUID(),
+      title: "New Chat",
+      updatedAt: Date.now(),
+      messages: []
+    };
+    sessions = [newSession, ...sessions];
+    currentSessionId = newSession.id;
+    saveSessions();
+  }
+
+  function deleteSession(id: string, e: Event) {
+    e.stopPropagation();
+    sessions = sessions.filter(s => s.id !== id);
+    if (sessions.length === 0) {
+      createNewSession();
+    } else if (currentSessionId === id) {
+      currentSessionId = sessions[0].id;
+    }
+    saveSessions();
+  }
+
   function parseThinking(rawContent: string) {
     let thinking = "";
     let answer = rawContent;
@@ -62,19 +128,27 @@
   }
 
   onMount(() => {
+    loadSessions();
+
     let unlistenChunk: (() => void) | undefined;
     let unlistenDone: (() => void) | undefined;
 
     (async () => {
       unlistenChunk = await listen<string>("chat-chunk", (event) => {
-        if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
-          messages[messages.length - 1].content += event.payload;
+        const sessionIndex = sessions.findIndex(s => s.id === currentSessionId);
+        if (sessionIndex !== -1) {
+          const msgs = sessions[sessionIndex].messages;
+          if (msgs.length > 0 && msgs[msgs.length - 1].role === "assistant") {
+            msgs[msgs.length - 1].content += event.payload;
+            saveSessions();
+          }
         }
         scrollToBottom();
       });
 
       unlistenDone = await listen("chat-done", () => {
         isGenerating = false;
+        saveSessions();
       });
     })();
 
@@ -90,14 +164,33 @@
     const userText = inputPrompt;
     inputPrompt = "";
 
-    messages = [
-      ...messages,
-      { role: "user", content: userText },
-      { role: "assistant", content: "" }
-    ];
+    const sessionIndex = sessions.findIndex(s => s.id === currentSessionId);
+    if (sessionIndex === -1) return;
+
+    const currentSess = sessions[sessionIndex];
+
+    // Cập nhật Tên Session nếu đây là tin nhắn đầu tiên
+    if (currentSess.messages.length === 0) {
+      currentSess.title = userText.slice(0, 30) + (userText.length > 30 ? "..." : "");
+    }
+
+    // Push tin nhắn User + Assistant trống
+    currentSess.messages.push({ role: "user", content: userText });
+    currentSess.messages.push({ role: "assistant", content: "" });
+    currentSess.updatedAt = Date.now();
+    saveSessions();
 
     isGenerating = true;
     scrollToBottom();
+
+    // Lọc bỏ bớt tag <think>...</think> ở các tin nhắn cũ trước khi gửi context cho LLM
+    const cleanContextMessages = currentSess.messages.slice(0, -1).map(m => {
+      if (m.role === "assistant") {
+        const parsed = parseThinking(m.content);
+        return { role: m.role, content: parsed.answer };
+      }
+      return m;
+    });
 
     try {
       await invoke("stream_chat_command", {
@@ -106,19 +199,20 @@
           baseUrl,
           apiKey,
           model: selectedModel,
-          messages: messages.slice(0, -1)
+          messages: cleanContextMessages
         }
       });
     } catch (err) {
       console.error(err);
-      messages[messages.length - 1].content = `[ERROR]: ${err}`;
+      const msgs = currentSess.messages;
+      msgs[msgs.length - 1].content = `[ERROR]: ${err}`;
       isGenerating = false;
+      saveSessions();
     }
   }
 </script>
 
 <div class="flex h-dvh w-screen overflow-hidden bg-[#0e0f12] text-zinc-100 font-sans antialiased">
-  <!-- Mobile Backdrop Overlay -->
   {#if isSidebarOpen}
     <!-- svelte-ignore a11y_click_events_have_key_events -->
     <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -128,9 +222,9 @@
     ></div>
   {/if}
 
-  <!-- Sidebar Config -->
+  <!-- Sidebar Config & Sessions List -->
   <aside 
-    class="fixed md:static inset-y-0 left-0 z-50 w-72 bg-[#13151a] border-r border-zinc-800/50 p-5 flex flex-col gap-5 transform transition-transform duration-200 ease-out shrink-0
+    class="fixed md:static inset-y-0 left-0 z-50 w-72 bg-[#13151a] border-r border-zinc-800/50 p-4 flex flex-col gap-4 transform transition-transform duration-200 ease-out shrink-0
     {isSidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}"
   >
     <div class="flex items-center justify-between">
@@ -148,67 +242,98 @@
       </button>
     </div>
 
-    <div class="flex flex-col gap-4 overflow-y-auto flex-1 pr-1">
-      <!-- Provider Select -->
-      <div class="flex flex-col gap-1.5">
-        <label for="provider-select" class="text-[11px] font-semibold text-zinc-400 tracking-wider uppercase">Provider</label>
+    <!-- Nút New Chat -->
+    <button 
+      onclick={createNewSession}
+      class="flex items-center justify-center gap-2 w-full py-2.5 px-4 bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-semibold rounded-xl text-xs transition-all shadow-md shadow-emerald-950/20 cursor-pointer"
+    >
+      <Plus class="w-4 h-4" />
+      <span>Cuộc trò chuyện mới</span>
+    </button>
+
+    <!-- Sessions List (History) -->
+    <div class="flex flex-col gap-1 overflow-y-auto max-h-48 border-b border-zinc-800/60 pb-3 pr-1">
+      <span class="text-[10px] font-semibold text-zinc-500 tracking-wider uppercase px-1 mb-1">Lịch sử Chat</span>
+      {#each sessions as s (s.id)}
+        <div 
+          onclick={() => currentSessionId = s.id}
+          role="button"
+          tabindex="0"
+          onkeydown={(e) => e.key === 'Enter' && (currentSessionId = s.id)}
+          class="flex items-center justify-between px-3 py-2 rounded-xl text-xs cursor-pointer transition-colors group
+          {s.id === currentSessionId ? 'bg-zinc-800/80 text-zinc-100 font-medium' : 'text-zinc-400 hover:bg-zinc-800/40 hover:text-zinc-200'}"
+        >
+          <div class="flex items-center gap-2 truncate pr-2">
+            <MessageSquare class="w-3.5 h-3.5 text-zinc-500 shrink-0" />
+            <span class="truncate">{s.title}</span>
+          </div>
+          <button 
+            onclick={(e) => deleteSession(s.id, e)}
+            class="opacity-0 group-hover:opacity-100 hover:text-red-400 p-1 transition-opacity"
+            title="Xóa conversation"
+          >
+            <Trash2 class="w-3.5 h-3.5" />
+          </button>
+        </div>
+      {/each}
+    </div>
+
+    <!-- Provider Config Controls -->
+    <div class="flex flex-col gap-3.5 overflow-y-auto flex-1 pr-1 pt-1">
+      <div class="flex flex-col gap-1">
+        <label for="provider-select" class="text-[10px] font-semibold text-zinc-400 tracking-wider uppercase">Provider</label>
         <div class="relative">
           <select 
             id="provider-select" 
             bind:value={provider} 
-            class="w-full bg-[#1a1d24] border border-zinc-800/80 rounded-xl px-3 py-2.5 text-xs font-medium text-zinc-100 appearance-none focus:outline-none focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/20 transition-all cursor-pointer"
+            class="w-full bg-[#1a1d24] border border-zinc-800/80 rounded-xl px-3 py-2 text-xs font-medium text-zinc-100 appearance-none focus:outline-none focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/20 transition-all cursor-pointer"
           >
             <option value="ollama" class="bg-[#1a1d24] text-zinc-100">Ollama (Local)</option>
             <option value="openai" class="bg-[#1a1d24] text-zinc-100">OpenAI Compatible</option>
             <option value="anthropic" class="bg-[#1a1d24] text-zinc-100">Anthropic Compatible</option>
           </select>
           <div class="pointer-events-none absolute inset-y-0 right-0 flex items-center px-3 text-zinc-400 text-xs">
-            <ChevronDown class="w-4 h-4" />
+            <ChevronDown class="w-3.5 h-3.5" />
           </div>
         </div>
       </div>
 
-      <!-- Base URL Input -->
-      <div class="flex flex-col gap-1.5">
-        <label for="base-url-input" class="text-[11px] font-semibold text-zinc-400 tracking-wider uppercase">API URL / Base URL</label>
+      <div class="flex flex-col gap-1">
+        <label for="base-url-input" class="text-[10px] font-semibold text-zinc-400 tracking-wider uppercase">Base URL</label>
         <input 
           id="base-url-input" 
           type="text" 
           bind:value={baseUrl} 
-          placeholder="http://localhost:11434" 
-          class="bg-[#1a1d24] border border-zinc-800/80 rounded-xl px-3 py-2 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/20 transition-all" 
+          class="bg-[#1a1d24] border border-zinc-800/80 rounded-xl px-3 py-1.5 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/20 transition-all" 
         />
       </div>
 
-      <!-- API Key Input -->
       {#if provider !== 'ollama'}
-        <div class="flex flex-col gap-1.5">
-          <label for="api-key-input" class="text-[11px] font-semibold text-zinc-400 tracking-wider uppercase">API Key</label>
+        <div class="flex flex-col gap-1">
+          <label for="api-key-input" class="text-[10px] font-semibold text-zinc-400 tracking-wider uppercase">API Key</label>
           <input 
             id="api-key-input" 
             type="password" 
             bind:value={apiKey} 
             placeholder="sk-..." 
-            class="bg-[#1a1d24] border border-zinc-800/80 rounded-xl px-3 py-2 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/20 transition-all" 
+            class="bg-[#1a1d24] border border-zinc-800/80 rounded-xl px-3 py-1.5 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/20 transition-all" 
           />
         </div>
       {/if}
 
-      <!-- Model Name Input -->
-      <div class="flex flex-col gap-1.5">
-        <label for="model-name-input" class="text-[11px] font-semibold text-zinc-400 tracking-wider uppercase">Model Name</label>
+      <div class="flex flex-col gap-1">
+        <label for="model-name-input" class="text-[10px] font-semibold text-zinc-400 tracking-wider uppercase">Model Name</label>
         <input 
           id="model-name-input" 
           type="text" 
           bind:value={selectedModel} 
-          placeholder="llama3.2, gpt-4o, claude-3-5..." 
-          class="bg-[#1a1d24] border border-zinc-800/80 rounded-xl px-3 py-2 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/20 transition-all" 
+          class="bg-[#1a1d24] border border-zinc-800/80 rounded-xl px-3 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/20 transition-all" 
         />
       </div>
     </div>
 
-    <div class="pt-3 border-t border-zinc-800/40 text-[10px] text-zinc-600 text-center font-mono">
-      &copy; 2026 Nekkochan. All right reserved
+    <div class="pt-2 border-t border-zinc-800/40 text-[10px] text-zinc-600 text-center font-mono">
+      &copy; 2026 Nekkochan
     </div>
   </aside>
 
@@ -235,17 +360,17 @@
 
     <!-- Chat Messages -->
     <div bind:this={chatContainer} class="flex-1 overflow-y-auto p-4 md:p-8 space-y-6">
-      {#if messages.length === 0}
+      {#if currentMessages.length === 0}
         <div class="h-full flex flex-col items-center justify-center text-zinc-500 px-4 text-center">
           <div class="w-12 h-12 mb-4 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400 text-xl">
             ✦
           </div>
-          <p class="text-sm font-semibold text-zinc-300">NekkoChat</p>
-          <p class="text-xs text-zinc-500 max-w-xs mt-1 leading-relaxed">I’m ready to help! What would you like to do today?</p>
+          <p class="text-sm font-semibold text-zinc-300">NekkoChat Session Ready</p>
+          <p class="text-xs text-zinc-500 max-w-xs mt-1 leading-relaxed">Hỏi câu đầu tiên để khởi tạo chủ đề chat nhé mày!</p>
         </div>
       {/if}
 
-      {#each messages as msg, index}
+      {#each currentMessages as msg, index}
         <div class="flex flex-col {msg.role === 'user' ? 'items-end' : 'items-start'}">
           <span class="text-[10px] font-medium text-zinc-500 mb-1.5 px-1">{msg.role === 'user' ? 'You' : selectedModel}</span>
           <div 
@@ -254,7 +379,7 @@
               ? 'bg-emerald-600 text-white rounded-tr-xs shadow-lg shadow-emerald-950/20' 
               : 'bg-[#181b22] text-zinc-200 border border-zinc-800/80 rounded-tl-xs shadow-sm'}"
           >
-            {#if msg.role === 'assistant' && !msg.content && isGenerating && index === messages.length - 1}
+            {#if msg.role === 'assistant' && !msg.content && isGenerating && index === currentMessages.length - 1}
               <span class="inline-flex gap-1 items-center py-1">
                 <span class="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse"></span>
                 <span class="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse [animation-delay:0.2s]"></span>
@@ -264,13 +389,11 @@
               {#if msg.role === 'assistant'}
                 {@const parsed = parseThinking(msg.content)}
                 
-                <!-- Thinking Collapsible Block -->
                 <ThinkingBlock 
                   thinkingText={parsed.thinking} 
-                  isGenerating={isGenerating && index === messages.length - 1 && !parsed.answer} 
+                  isGenerating={isGenerating && index === currentMessages.length - 1 && !parsed.answer} 
                 />
 
-                <!-- Main Response Markdown -->
                 {#if parsed.answer}
                   <Markdown content={parsed.answer} />
                 {/if}
@@ -293,21 +416,17 @@
           type="text"
           bind:value={inputPrompt}
           disabled={isGenerating}
-          placeholder={isGenerating ? "Responding..." : "Ask anything..."}
+          placeholder={isGenerating ? "AI đang trả lời..." : "Hỏi bất cứ điều gì..."}
           class="w-full bg-transparent px-4 py-2.5 text-xs md:text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none disabled:opacity-50"
         />
         <button
           type="submit"
           disabled={isGenerating || !inputPrompt.trim()}
-          class="bg-emerald-500 hover:bg-emerald-400 disabled:bg-zinc-800/50 disabled:text-zinc-600 text-zinc-950 font-bold px-4 py-2.5 rounded-xl text-xs transition-all shrink-0 cursor-pointer disabled:cursor-not-allowed"
+          class="bg-emerald-500 hover:bg-emerald-400 disabled:bg-zinc-800/50 disabled:text-zinc-600 text-zinc-950 font-bold px-4 py-2.5 rounded-xl text-xs transition-all shrink-0 cursor-pointer disabled:cursor-not-allowed flex items-center justify-center"
         >
-           <Send class="w-4 h-4" />
+          <Send class="w-4 h-4" />
         </button>
       </form>
-
-      <div class="pt-3 border-t border-zinc-800/40 text-[11px] text-zinc-600 text-center font-mono">
-        IMPORTANT NOTE: AI-generated responses may be inaccurate. Please verify any information you receive!
-      </div>
     </div>
   </main>
 </div>

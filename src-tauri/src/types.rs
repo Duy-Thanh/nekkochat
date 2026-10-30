@@ -16,6 +16,15 @@ pub struct ChatPayload {
     pub messages: Vec<ChatMessage>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatSession {
+    pub id: String,
+    pub title: String,
+    pub updated_at: u64,
+    pub messages: Vec<ChatMessage>,
+}
+
 // #[derive(Debug, Clone, Serialize)]
 // pub enum StreamChunk {
 //     Content(String),

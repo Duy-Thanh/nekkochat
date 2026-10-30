@@ -7,6 +7,46 @@ use tauri::{AppHandle, Emitter};
 use types::ChatPayload;
 use std::time::Duration;
 use tokio::time::timeout;
+use std::fs;
+use std::path::PathBuf;
+use tauri::Manager;
+use types::ChatSession;
+
+fn get_sessions_file_path(app: &AppHandle) -> Result<PathBuf, String> {
+    // app_data_dir() tự resolve chuẩn:
+    // - Linux:   ~/.local/share/com.nekkochat.app/
+    // - Android: /data/user/0/com.nekkochat.app/files/
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to resolve app data dir: {}", e))?;
+
+    if !dir.exists() {
+        fs::create_dir_all(&dir).map_err(|e| format!("Failed to create directory {:?}: {}", dir, e))?;
+    }
+
+    Ok(dir.join("sessions.json"))
+}
+
+#[tauri::command]
+async fn load_sessions(app: AppHandle) -> Result<Vec<ChatSession>, String> {
+    let path = get_sessions_file_path(&app)?;
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let content = fs::read_to_string(path).map_err(|e| format!("Failed to read sessions: {}", e))?;
+    let sessions: Vec<ChatSession> = serde_json::from_str(&content).unwrap_or_default();
+    Ok(sessions)
+}
+
+#[tauri::command]
+async fn save_sessions(app: AppHandle, sessions: Vec<ChatSession>) -> Result<(), String> {
+    let path = get_sessions_file_path(&app)?;
+    let content = serde_json::to_string_pretty(&sessions).map_err(|e| format!("Failed to serialize sessions: {}", e))?;
+    fs::write(path, content).map_err(|e| format!("Failed to write sessions: {}", e))?;
+    Ok(())
+}
 
 #[tauri::command]
 async fn stream_chat_command(app: AppHandle, payload: ChatPayload) -> Result<(), String> {
@@ -93,7 +133,11 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![stream_chat_command])
+        .invoke_handler(tauri::generate_handler![
+            stream_chat_command,
+            load_sessions,
+            save_sessions
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
