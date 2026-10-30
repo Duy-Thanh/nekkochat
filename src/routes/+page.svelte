@@ -3,14 +3,14 @@
   import { listen } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
   import Markdown from '$lib/Markdown.svelte';
+  import ThinkingBlock from '$lib/ThinkingBlock.svelte';
 
   import { 
     X, 
     Menu, 
     ChevronDown, 
     Send, 
-    Sparkles, 
-    Bot 
+    Sparkles 
   } from '@lucide/svelte';
 
   type Message = {
@@ -18,10 +18,10 @@
     content: string;
   };
 
-  let provider = $state("openai"); // "ollama" | "openai" | "anthropic"
-  let baseUrl = $state("http://localhost:11434/v1");
+  let provider = $state("openai");
+  let baseUrl = $state("https://integrate.api.nvidia.com/v1");
   let apiKey = $state("");
-  let selectedModel = $state("llama3.2");
+  let selectedModel = $state("nvidia/nemotron-3-ultra-550b-a55b");
   let inputPrompt = $state("");
   let messages = $state<Message[]>([]);
   let isGenerating = $state(false);
@@ -29,7 +29,6 @@
 
   let chatContainer: HTMLDivElement;
 
-  // Set default baseURL when change provider
   $effect(() => {
     if (provider === "ollama") {
       baseUrl = "http://localhost:11434";
@@ -46,27 +45,43 @@
     }, 50);
   }
 
+  // Tách tag <think>...</think> ra khỏi nội dung trả về
+  function parseThinking(rawContent: string) {
+    let thinking = "";
+    let answer = rawContent;
+
+    const thinkMatches = rawContent.match(/<think>([\s\S]*?)<\/think>/g);
+    if (thinkMatches) {
+      thinking = thinkMatches
+        .map(match => match.replace(/<\/?think>/g, ''))
+        .join('');
+      answer = rawContent.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+    }
+
+    return { thinking, answer };
+  }
+
   onMount(() => {
     let unlistenChunk: (() => void) | undefined;
     let unlistenDone: (() => void) | undefined;
 
     (async () => {
-      const unlistenChunk = await listen<string>("chat-chunk", (event) => {
+      unlistenChunk = await listen<string>("chat-chunk", (event) => {
         if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
           messages[messages.length - 1].content += event.payload;
         }
         scrollToBottom();
       });
 
-      const unlistenDone = await listen("chat-done", () => {
+      unlistenDone = await listen("chat-done", () => {
         isGenerating = false;
       });
+    })();
 
-      return () => {
-        if (unlistenChunk) unlistenChunk();
-        if (unlistenDone) unlistenDone();
-      };
-    })
+    return () => {
+      if (unlistenChunk) unlistenChunk();
+      if (unlistenDone) unlistenDone();
+    };
   });
 
   async function sendMessage() {
@@ -230,7 +245,7 @@
         </div>
       {/if}
 
-      {#each messages as msg}
+      {#each messages as msg, index}
         <div class="flex flex-col {msg.role === 'user' ? 'items-end' : 'items-start'}">
           <span class="text-[10px] font-medium text-zinc-500 mb-1.5 px-1">{msg.role === 'user' ? 'You' : selectedModel}</span>
           <div 
@@ -239,7 +254,7 @@
               ? 'bg-emerald-600 text-white rounded-tr-xs shadow-lg shadow-emerald-950/20' 
               : 'bg-[#181b22] text-zinc-200 border border-zinc-800/80 rounded-tl-xs shadow-sm'}"
           >
-            {#if msg.role === 'assistant' && !msg.content && isGenerating}
+            {#if msg.role === 'assistant' && !msg.content && isGenerating && index === messages.length - 1}
               <span class="inline-flex gap-1 items-center py-1">
                 <span class="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse"></span>
                 <span class="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse [animation-delay:0.2s]"></span>
@@ -247,7 +262,18 @@
               </span>
             {:else}
               {#if msg.role === 'assistant'}
-                <Markdown content={msg.content} />
+                {@const parsed = parseThinking(msg.content)}
+                
+                <!-- Thinking Collapsible Block -->
+                <ThinkingBlock 
+                  thinkingText={parsed.thinking} 
+                  isGenerating={isGenerating && index === messages.length - 1 && !parsed.answer} 
+                />
+
+                <!-- Main Response Markdown -->
+                {#if parsed.answer}
+                  <Markdown content={parsed.answer} />
+                {/if}
               {:else}
                 {msg.content}
               {/if}

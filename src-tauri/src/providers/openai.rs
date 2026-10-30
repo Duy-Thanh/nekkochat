@@ -93,12 +93,11 @@ impl LlmProvider for OpenAiProvider {
                     } else if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&ev.data) {
                         let delta = &parsed["choices"][0]["delta"];
                         
-                        // Lấy content chính, nếu không có thì lấy reasoning_content (suy luận)
                         if let Some(content) = delta["content"].as_str() {
                             Some(Ok(content.to_string()))
                         } else if let Some(reasoning) = delta["reasoning_content"].as_str() {
-                            // Trả về phần suy nghĩ của AI (có thể bọc tag để UI hiển thị nếu thích)
-                            Some(Ok(reasoning.to_string()))
+                            // Bọc reasoning content trong tag <think> để frontend dễ parse
+                            Some(Ok(format!("<think>{}</think>", reasoning)))
                         } else {
                             None
                         }
@@ -106,11 +105,7 @@ impl LlmProvider for OpenAiProvider {
                         None
                     }
                 }
-                Err(e) => {
-                    let err_msg = format!("Stream SSE Parse Error: {}", e);
-                    println!("[E] {}", err_msg);
-                    Some(Err(err_msg))
-                }
+                Err(e) => Some(Err(format!("Stream error: {}", e))),
             }
         });
 
