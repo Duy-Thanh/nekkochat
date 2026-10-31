@@ -5,6 +5,7 @@
   import { onMount } from "svelte";
   import Markdown from '$lib/Markdown.svelte';
   import ThinkingBlock from '$lib/ThinkingBlock.svelte';
+  import { SYSTEM_PRESETS, type SystemPreset } from '$lib/presets';
 
   import { 
     X, 
@@ -16,7 +17,9 @@
     Trash2,
     Paperclip,
     FileText,
-    Loader2
+    Loader2,
+    SlidersHorizontal,
+    Sparkles
   } from '@lucide/svelte';
 
   type Message = {
@@ -28,6 +31,7 @@
     id: string;
     title: string;
     updatedAt: number;
+    systemPrompt: string;
     messages: Message[];
   };
 
@@ -41,6 +45,9 @@
   let sessions = $state<ChatSession[]>([]);
   let currentSessionId = $state<string>("");
 
+  // Presets UI State
+  let isPresetModalOpen = $state(false);
+
   // RAG Indexing State
   let isIndexing = $state(false);
   let indexedFiles = $state<string[]>([]);
@@ -51,10 +58,13 @@
 
   let chatContainer: HTMLDivElement;
 
-  // Lấy danh sách tin nhắn của Session hiện tại
+  // Lấy Session hiện tại
+  let currentSession = $derived.by(() => {
+    return sessions.find(s => s.id === currentSessionId);
+  });
+
   let currentMessages = $derived.by(() => {
-    const s = sessions.find(s => s.id === currentSessionId);
-    return s ? s.messages : [];
+    return currentSession ? currentSession.messages : [];
   });
 
   $effect(() => {
@@ -73,12 +83,14 @@
     }, 50);
   }
 
-  // Load Sessions từ Rust Persistence File
   async function loadSessions() {
     try {
       const savedSessions = await invoke<ChatSession[]>("load_sessions");
       if (savedSessions && savedSessions.length > 0) {
-        sessions = savedSessions;
+        sessions = savedSessions.map(s => ({
+          ...s,
+          systemPrompt: s.systemPrompt || SYSTEM_PRESETS[0].prompt
+        }));
         currentSessionId = sessions[0].id;
       } else {
         createNewSession();
@@ -89,7 +101,6 @@
     }
   }
 
-  // Save Sessions sang Rust Persistence File
   async function saveSessions() {
     try {
       await invoke("save_sessions", { sessions: $state.snapshot(sessions) });
@@ -98,16 +109,25 @@
     }
   }
 
-  function createNewSession() {
+  function createNewSession(presetPrompt?: string) {
     const newSession: ChatSession = {
       id: crypto.randomUUID(),
       title: "New Chat",
       updatedAt: Date.now(),
+      systemPrompt: presetPrompt || SYSTEM_PRESETS[0].prompt,
       messages: []
     };
     sessions = [newSession, ...sessions];
     currentSessionId = newSession.id;
     saveSessions();
+  }
+
+  function applyPreset(preset: SystemPreset) {
+    if (currentSession) {
+      currentSession.systemPrompt = preset.prompt;
+      saveSessions();
+    }
+    isPresetModalOpen = false;
   }
 
   function deleteSession(id: string, e: Event) {
@@ -136,7 +156,6 @@
     return { thinking, answer };
   }
 
-  // Chọn và Index file tài liệu vào RAG Engine
   async function handlePickAndIndexFile() {
     try {
       const selected = await open({
@@ -149,9 +168,8 @@
 
       if (selected && typeof selected === 'string') {
         isIndexing = true;
-        ragStatusMsg = "Đang tạo Vector Embeddings cho file...";
+        ragStatusMsg = "Đang tạo Vector Embeddings...";
         
-        // Gọi Rust backend index file
         const res = await invoke<string>("index_document_command", {
           baseUrl,
           apiKey,
@@ -229,14 +247,22 @@
     isGenerating = true;
     scrollToBottom();
 
-    // Lọc bỏ bớt tag <think>...</think> ở các tin nhắn cũ
-    const cleanContextMessages = currentSess.messages.slice(0, -1).map(m => {
+    // 1. Clean history
+    const cleanContextMessages: Message[] = currentSess.messages.slice(0, -1).map(m => {
       if (m.role === "assistant") {
         const parsed = parseThinking(m.content);
         return { role: m.role, content: parsed.answer };
       }
       return m;
     });
+
+    // 2. Chèn System Prompt của Session vào vị trí đầu tiên
+    if (currentSess.systemPrompt) {
+      cleanContextMessages.unshift({
+        role: "system",
+        content: currentSess.systemPrompt
+      });
+    }
 
     try {
       await invoke("stream_chat_command", {
@@ -268,9 +294,41 @@
     ></div>
   {/if}
 
+  <!-- System Preset Selection Modal -->
+  {#if isPresetModalOpen}
+    <div class="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
+      <div class="bg-[#13151a] border border-zinc-800 rounded-2xl w-full max-w-lg p-5 flex flex-col gap-4 shadow-2xl">
+        <div class="flex items-center justify-between border-b border-zinc-800 pb-3">
+          <div class="flex items-center gap-2">
+            <Sparkles class="w-4 h-4 text-emerald-400" />
+            <h3 class="font-bold text-sm text-zinc-100">Chọn Vai Trò (System Prompt Preset)</h3>
+          </div>
+          <button onclick={() => isPresetModalOpen = false} class="text-zinc-400 hover:text-white p-1">
+            <X class="w-4 h-4" />
+          </button>
+        </div>
+
+        <div class="flex flex-col gap-2 max-h-96 overflow-y-auto pr-1">
+          {#each SYSTEM_PRESETS as preset}
+            <button 
+              onclick={() => applyPreset(preset)}
+              class="flex flex-col items-start p-3 rounded-xl border border-zinc-800/80 bg-[#181b22] hover:bg-zinc-800/50 hover:border-emerald-500/50 text-left transition-all group cursor-pointer"
+            >
+              <div class="flex items-center gap-2 font-bold text-xs text-zinc-200 group-hover:text-emerald-400">
+                <span>{preset.icon}</span>
+                <span>{preset.name}</span>
+              </div>
+              <p class="text-[11px] text-zinc-400 mt-1 leading-relaxed">{preset.description}</p>
+            </button>
+          {/each}
+        </div>
+      </div>
+    </div>
+  {/if}
+
   <!-- Sidebar Config & Sessions List -->
   <aside 
-    class="fixed md:static inset-y-0 left-0 z-50 w-72 bg-[#13151a] border-r border-zinc-800/50 p-4 flex flex-col gap-4 transform transition-transform duration-200 ease-out shrink-0
+    class="fixed md:static inset-y-0 left-0 z-40 w-72 bg-[#13151a] border-r border-zinc-800/50 p-4 flex flex-col gap-4 transform transition-transform duration-200 ease-out shrink-0
     {isSidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}"
   >
     <div class="flex items-center justify-between">
@@ -290,7 +348,7 @@
 
     <!-- Nút New Chat -->
     <button 
-      onclick={createNewSession}
+      onclick={() => createNewSession()}
       class="flex items-center justify-center gap-2 w-full py-2.5 px-4 bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-semibold rounded-xl text-xs transition-all shadow-md shadow-emerald-950/20 cursor-pointer"
     >
       <Plus class="w-4 h-4" />
@@ -399,9 +457,22 @@
           <span class="font-semibold text-xs text-zinc-200 tracking-wide">{selectedModel}</span>
         </div>
       </div>
-      <span class="text-[10px] font-semibold px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono uppercase">
-        {provider}
-      </span>
+
+      <!-- Action Control Header -->
+      <div class="flex items-center gap-2">
+        <button 
+          onclick={() => isPresetModalOpen = true}
+          class="flex items-center gap-1.5 px-3 py-1 rounded-xl bg-zinc-800/60 hover:bg-zinc-800 text-zinc-300 border border-zinc-700/50 text-xs font-medium transition-all cursor-pointer"
+          title="Chọn vai trò System Prompt"
+        >
+          <SlidersHorizontal class="w-3.5 h-3.5 text-emerald-400" />
+          <span>Role Persona</span>
+        </button>
+
+        <span class="text-[10px] font-semibold px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono uppercase">
+          {provider}
+        </span>
+      </div>
     </header>
 
     <!-- Chat Messages -->
@@ -412,7 +483,7 @@
             ✦
           </div>
           <p class="text-sm font-semibold text-zinc-300">NekkoChat Ready</p>
-          <p class="text-xs text-zinc-500 max-w-xs mt-1 leading-relaxed">Ném file code/tài liệu vào để kích hoạt RAG Vector Search hoặc đặt câu hỏi ngay!</p>
+          <p class="text-xs text-zinc-500 max-w-xs mt-1 leading-relaxed">Chọn Role Persona ở góc phải hoặc ném file code vào để RAG phân tích!</p>
         </div>
       {/if}
 
@@ -455,7 +526,6 @@
     <!-- Floating Input Box & RAG File Indexer -->
     <div class="p-4 md:p-6 bg-gradient-to-t from-[#0e0f12] via-[#0e0f12]/90 to-transparent shrink-0">
       <div class="max-w-3xl mx-auto flex flex-col gap-2">
-        <!-- RAG Indexed Files & Status Badge -->
         {#if indexedFiles.length > 0 || ragStatusMsg}
           <div class="flex items-center gap-2 overflow-x-auto py-1 px-1 text-xs">
             {#if ragStatusMsg}
@@ -480,7 +550,6 @@
           onsubmit={(e) => { e.preventDefault(); sendMessage(); }} 
           class="relative flex items-center bg-[#181b22] border border-zinc-800/80 rounded-2xl shadow-xl shadow-black/40 focus-within:border-emerald-500/50 focus-within:ring-1 focus-within:ring-emerald-500/20 transition-all p-1.5 gap-2"
         >
-          <!-- Nút chọn File Index RAG -->
           <button
             type="button"
             onclick={handlePickAndIndexFile}
@@ -499,7 +568,7 @@
             type="text"
             bind:value={inputPrompt}
             disabled={isGenerating}
-            placeholder={isGenerating ? "AI đang trả lời..." : "Hỏi bất cứ điều gì hoặc nhờ phân tích tài liệu đã đính kèm..."}
+            placeholder={isGenerating ? "AI đang trả lời..." : "Hỏi bất cứ điều gì hoặc nhờ phân tích tài liệu..."}
             class="w-full bg-transparent px-2 py-2.5 text-xs md:text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none disabled:opacity-50"
           />
 

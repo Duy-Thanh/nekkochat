@@ -1,55 +1,62 @@
 <script lang="ts">
-    import { marked } from 'marked';
-    import hljs from 'highlight.js';
-    import 'highlight.js/styles/xcode.min.css';
+  import { marked } from 'marked';
 
-    let { content = '' } = $props();
-    
-    // Marked with highlight.js
-    marked.setOptions({
-        gfm: true,
-        breaks: true,
-    });
+  let { content = '' } = $props();
 
-    // Customize renderer to use highlight.js for code blocks
-    const renderer = new marked.Renderer();
-    renderer.code = ({ text, lang }) => {
-        const validLang = lang && hljs.getLanguage(lang) ? lang : 'plaintext';
-        const highlighted = hljs.highlight(text, { language: validLang }).value;
-        return `<pre class="my-3 p-3 rounded-xl bg-[#0e0f12] border border-zinc-800/80 overflow-x-auto font-mono text-xs text-emerald-300 leading-relaxed"><code>${highlighted}</code></pre>`;
-    };
+  // Cau hinh marked de render table mượt hơn
+  marked.setOptions({
+    gfm: true,
+    breaks: true
+  });
 
-    renderer.table = (token) => {
-        // Render header cells
-        const headerHtml = token.header
-        .map((cell) => `<th class="p-2.5 font-semibold text-zinc-300 border-b border-zinc-800">${marked.parseInline(cell.text)}</th>`)
-        .join('');
-
-        // Render body rows
-        const bodyHtml = token.rows
-        .map((row) => {
-            const rowCells = row
-            .map((cell) => `<td class="p-2.5 text-zinc-300 border-b border-zinc-800/40">${marked.parseInline(cell.text)}</td>`)
-            .join('');
-            return `<tr class="hover:bg-zinc-800/30 transition-colors">${rowCells}</tr>`;
-        })
-        .join('');
-
-        return `<div class="my-3 overflow-x-auto border border-zinc-800 rounded-xl">
-                    <table class="w-full text-xs text-left border-collapse">
-                        <thead class="bg-[#13151a] font-mono">
-                        <tr>${headerHtml}</tr>
-                        </thead>
-                        <tbody class="divide-y divide-zinc-800/60 bg-[#181b22]/50">
-                        ${bodyHtml}
-                        </tbody>
-                    </table>
-                </div>`;
-    };
-
-    let htmlContent = $derived(marked.parse(content, { renderer }));
+  let renderedHtml = $derived(marked.parse(content));
 </script>
 
-<div class="prose prose-invert max-w-none text-xs md:text-sm leading-relaxed space-y-2">
-  {@html htmlContent}
+<div class="markdown-body prose prose-invert max-w-none text-xs md:text-sm leading-relaxed">
+  {@html renderedHtml}
 </div>
+
+<style>
+  :global(.markdown-body table) {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 1rem;
+    margin-bottom: 1rem;
+    font-size: 0.8125rem;
+    background-color: #13151a;
+    border-radius: 0.75rem;
+    overflow: hidden;
+    border: 1px solid rgba(63, 63, 70, 0.5);
+  }
+
+  :global(.markdown-body th) {
+    background-color: #1a1d24;
+    color: #e4e4e7;
+    font-weight: 600;
+    text-align: left;
+    padding: 0.625rem 0.875rem;
+    border-bottom: 1px solid rgba(63, 63, 70, 0.6);
+  }
+
+  :global(.markdown-body td) {
+    padding: 0.625rem 0.875rem;
+    color: #d4d4d8;
+    border-bottom: 1px solid rgba(63, 63, 70, 0.3);
+  }
+
+  :global(.markdown-body tr:last-child td) {
+    border-bottom: none;
+  }
+
+  :global(.markdown-body tr:nth-child(even)) {
+    background-color: rgba(24, 27, 34, 0.5);
+  }
+
+  :global(.markdown-body p) {
+    margin-bottom: 0.75rem;
+  }
+
+  :global(.markdown-body p:last-child) {
+    margin-bottom: 0;
+  }
+</style>

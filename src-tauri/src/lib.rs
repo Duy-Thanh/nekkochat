@@ -181,6 +181,19 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .setup({
+            let rag_engine = rag_engine.clone();
+            move |app| {
+                if let Ok(dir) = app.path().app_data_dir() {
+                    if !dir.exists() {
+                        let _ = fs::create_dir_all(&dir);
+                    }
+                    let mut rag = rag_engine.blocking_lock();
+                    rag.init_storage(dir);
+                }
+                Ok(())
+            }
+        })
         .manage(AppState { rag: rag_engine }) // <-- Bắt buộc phải manage AppState ở đây!
         .invoke_handler(tauri::generate_handler![
             stream_chat_command,

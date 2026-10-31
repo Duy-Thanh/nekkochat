@@ -4,11 +4,12 @@ use crate::types::{
 use reqwest::Client;
 use serde_json::json;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub struct RagEngine {
     client: Client,
     chunks: Vec<DocumentChunk>,
+    storage_path: Option<PathBuf>,
 }
 
 impl RagEngine {
@@ -16,6 +17,32 @@ impl RagEngine {
         Self {
             client: Client::new(),
             chunks: Vec::new(),
+            storage_path: None,
+        }
+    }
+
+    // Set đường dẫn lưu file rag_store.json và tự động load vector cũ lên RAM
+    pub fn init_storage(&mut self, app_dir: PathBuf) {
+        let store_file = app_dir.join("rag_store.json");
+        self.storage_path = Some(store_file.clone());
+
+        if store_file.exists() {
+            if let Ok(content) = fs::read_to_string(&store_file) {
+                if let Ok(saved_chunks) = serde_json::from_str::<Vec<DocumentChunk>>(&content) {
+                    println!("[RAG PERSISTENCE] Loaded {} chunks from disk!", saved_chunks.len());
+                    self.chunks = saved_chunks;
+                }
+            }
+        }
+    }
+
+    // Ghi toàn bộ Vector Chunks xuống đĩa
+    fn save_to_disk(&self) {
+        if let Some(ref path) = self.storage_path {
+            if let Ok(content) = serde_json::to_string_pretty(&self.chunks) {
+                let _ = fs::write(path, content);
+                println!("[RAG PERSISTENCE] Saved {} chunks to disk!", self.chunks.len());
+            }
         }
     }
 
@@ -35,7 +62,6 @@ impl RagEngine {
             format!("{}/v1/embeddings", clean_base)
         };
 
-        // Dùng chuẩn con model Nemotron-3 Embed này cho Nvidia NIM
         let embedding_model = if base_url.contains("nvidia.com") {
             "nvidia/nemotron-3-embed-1b"
         } else {
@@ -123,6 +149,9 @@ impl RagEngine {
                 }
             }
         }
+
+        // TỰ ĐỘNG PERSIST XUỐNG DĨA SAU KHI INDEX XONG
+        self.save_to_disk();
 
         Ok(count)
     }
