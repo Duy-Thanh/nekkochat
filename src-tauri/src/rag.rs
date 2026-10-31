@@ -35,19 +35,17 @@ impl RagEngine {
             format!("{}/v1/embeddings", clean_base)
         };
 
-        // nvidia/nv-embed-v1 là model embedding chuẩn được cấp permission mặc định cho tất cả nvapi keys
+        // Dùng chuẩn con model Nemotron-3 Embed này cho Nvidia NIM
         let embedding_model = if base_url.contains("nvidia.com") {
             "nvidia/nemotron-3-embed-1b"
         } else {
             "text-embedding-3-small"
         };
 
-        println!("[RAG EMBEDDING] Sending request to: {} | Model: {}", url, embedding_model);
-
         let body = json!({
             "input": text,
             "model": embedding_model,
-            "input_type": "passage" // Nvidia NIM yêu cầu input_type với một số model
+            "input_type": "passage"
         });
 
         let mut req = self.client.post(&url).json(&body);
@@ -63,16 +61,13 @@ impl RagEngine {
         let status = res.status();
         if !status.is_success() {
             let err_text = res.text().await.unwrap_or_default();
-            return Err(format!(
-                "API Error [HTTP {}] at {}:\n{}\n\n[Gợi ý]: Hãy kiểm tra lại API Key hoặc cấp quyền cho Embedding Models trên Nvidia Dashboard.",
-                status, url, err_text
-            ));
+            return Err(format!("API Error [HTTP {}] at {}: {}", status, url, err_text));
         }
 
         let parsed: OpenAiEmbeddingResponse = res
             .json()
             .await
-            .map_err(|e| format!("Parse OpenAI embedding JSON error: {}", e))?;
+            .map_err(|e| format!("Parse embedding error: {}", e))?;
 
         if let Some(first) = parsed.data.into_iter().next() {
             Ok(first.embedding)
