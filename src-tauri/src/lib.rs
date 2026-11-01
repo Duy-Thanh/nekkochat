@@ -1,13 +1,15 @@
 mod connection;
 mod providers;
 mod rag;
+mod secrets;
 mod types;
+mod vault;
 
 use futures::StreamExt;
 use providers::get_provider;
 use rag::RagEngine;
 use reqwest::Client;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -19,41 +21,54 @@ use tokio::time::timeout;
 
 use types::{
     ChatMessage, ChatPayload, ChatSession, ChunkEvent, DocumentChunk, DocumentInfo,
-    EmbeddingConfig, Settings,
+    EmbeddingConfig, Settings, SettingsLoad,
 };
 
-// Thời gian tối đa chờ chunk kế tiếp (model reasoning có thể "nghĩ" khá lâu)
+// Max wait for the next chunk (reasoning models can "think" for quite a while)
 const CHUNK_TIMEOUT: Duration = Duration::from_secs(90);
 const RAG_TOP_K: usize = 3;
 
 pub struct AppState {
     pub rag: Arc<Mutex<RagEngine>>,
+    /// Where API keys live: the OS keychain, or an encrypted vault when there is none
+    pub secrets: secrets::Backend,
+    /// Secret keys that failed to load; protects them from being deleted by a later save
+    pub unreadable_keys: StdMutex<HashSet<String>>,
     pub http: Client,
-    /// session_id -> task đang stream, để nút Stop có thể hủy
+    /// session_id -> streaming task, so the Stop button can abort it
     pub tasks: Arc<StdMutex<HashMap<String, AbortHandle>>>,
 }
 
-/// Ghi ra file tạm rồi rename để crash giữa chừng không làm hỏng dữ liệu.
+/// Writes to a temp file then renames, so a crash mid-write cannot corrupt the data.
 pub(crate) fn write_atomic(path: &Path, content: &str) -> Result<(), String> {
     let tmp = path.with_extension("tmp");
     fs::write(&tmp, content).map_err(|e| format!("Failed to write {:?}: {}", tmp, e))?;
     fs::rename(&tmp, path).map_err(|e| format!("Failed to replace {:?}: {}", path, e))
 }
 
-fn app_file(app: &AppHandle, name: &str) -> Result<PathBuf, String> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("Failed to resolve app data dir: {}", e))?;
+/// The folder holding all app data. `NEKKOCHAT_DATA_DIR` overrides the default location,
+/// which allows a portable install or running a second, fully isolated instance.
+fn data_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = match std::env::var_os("NEKKOCHAT_DATA_DIR") {
+        Some(custom) if !custom.is_empty() => PathBuf::from(custom),
+        _ => app
+            .path()
+            .app_data_dir()
+            .map_err(|e| format!("Failed to resolve app data dir: {}", e))?,
+    };
 
     if !dir.exists() {
         fs::create_dir_all(&dir)
             .map_err(|e| format!("Failed to create directory {:?}: {}", dir, e))?;
     }
-    Ok(dir.join(name))
+    Ok(dir)
 }
 
-/// Embedding mặc định dùng chung endpoint với chat (trừ Anthropic - không có embeddings API).
+fn app_file(app: &AppHandle, name: &str) -> Result<PathBuf, String> {
+    Ok(data_dir(app)?.join(name))
+}
+
+/// Embedding defaults to the chat endpoint (except Anthropic, which has no embeddings API).
 fn resolve_embedding(
     provider: &str,
     base_url: &str,
@@ -85,7 +100,7 @@ async fn index_document_command(
     let cfg = resolve_embedding(&provider, &base_url, &api_key, &embedding);
     let (file_name, texts) = rag::read_and_chunk(Path::new(&file_path))?;
 
-    // Gọi API embedding KHÔNG giữ lock RAG để chat vẫn dùng được trong lúc index.
+    // Call the embedding API WITHOUT holding the RAG lock so chat keeps working while indexing.
     let total = texts.len();
     let mut chunks = Vec::with_capacity(total);
     for (i, text) in texts.into_iter().enumerate() {
@@ -137,21 +152,138 @@ async fn delete_document(state: State<'_, AppState>, file_name: String) -> Resul
 }
 
 #[tauri::command]
-async fn load_settings(app: AppHandle) -> Result<Option<Settings>, String> {
+async fn load_settings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<SettingsLoad>, String> {
     let path = app_file(&app, "settings.json")?;
     if !path.exists() {
         return Ok(None);
     }
     let content = fs::read_to_string(&path).map_err(|e| format!("Failed to read settings: {}", e))?;
-    Ok(serde_json::from_str(&content).ok())
+    let mut settings: Settings = match serde_json::from_str(&content) {
+        Ok(s) => s,
+        Err(e) => {
+            // Don't let the next save overwrite a file we couldn't parse
+            let backup = path.with_extension("json.bak");
+            let _ = fs::copy(&path, &backup);
+            eprintln!("[settings] settings.json is invalid ({}); backed up to {:?}", e, backup);
+            return Ok(None);
+        }
+    };
+
+    // With a locked or missing vault there is nothing to read: keys stay empty until unlock
+    let warnings = match state.secrets.store() {
+        Some(store) => {
+            let mut unreadable = state.unreadable_keys.lock().unwrap();
+            secrets::apply_on_load(store, &mut settings, &mut unreadable)
+        }
+        None => Vec::new(),
+    };
+    Ok(Some(SettingsLoad { settings, warnings, secrets: state.secrets.status() }))
+}
+
+/// Returns warnings (for example a key that could not be stored securely).
+/// API keys are never written to settings.json, whatever happens.
+#[tauri::command]
+async fn save_settings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    mut settings: Settings,
+) -> Result<Vec<String>, String> {
+    let path = app_file(&app, "settings.json")?;
+
+    let previous_ids: Vec<String> = fs::read_to_string(&path)
+        .ok()
+        .and_then(|c| serde_json::from_str::<Settings>(&c).ok())
+        .map(|s| s.profiles.into_iter().map(|p| p.id).collect())
+        .unwrap_or_default();
+
+    let warnings = match state.secrets.store() {
+        Some(store) => {
+            let mut unreadable = state.unreadable_keys.lock().unwrap();
+            secrets::move_on_save(store, &mut settings, &previous_ids, &mut unreadable)
+        }
+        None => {
+            let dropped = secrets::withhold_keys(&mut settings);
+            match (dropped, state.secrets.status()) {
+                (0, _) => Vec::new(),
+                (n, secrets::SecretsStatus::VaultLocked) => vec![format!(
+                    "{} API key(s) were not saved because the vault is locked. Unlock it first.",
+                    n
+                )],
+                (n, _) => vec![format!(
+                    "{} API key(s) were not saved: no OS keychain is available. Set a master password in Settings to store them encrypted.",
+                    n
+                )],
+            }
+        }
+    };
+
+    let content = serde_json::to_string_pretty(&settings)
+        .map_err(|e| format!("Failed to serialize settings: {}", e))?;
+    write_atomic(&path, &content)?;
+    Ok(warnings)
 }
 
 #[tauri::command]
-async fn save_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
-    let path = app_file(&app, "settings.json")?;
-    let content = serde_json::to_string_pretty(&settings)
-        .map_err(|e| format!("Failed to serialize settings: {}", e))?;
-    write_atomic(&path, &content)
+fn secrets_status(state: State<'_, AppState>) -> secrets::SecretsStatus {
+    state.secrets.status()
+}
+
+/// Runs a (slow, CPU/memory-heavy) vault operation off the async runtime and returns the new status.
+async fn run_vault<F>(state: &State<'_, AppState>, op: F) -> Result<secrets::SecretsStatus, String>
+where
+    F: FnOnce(&vault::Vault) -> Result<(), String> + Send + 'static,
+{
+    let vault = state.secrets.vault()?.clone();
+    tauri::async_runtime::spawn_blocking(move || op(&vault))
+        .await
+        .map_err(|e| e.to_string())??;
+    Ok(state.secrets.status())
+}
+
+#[tauri::command]
+async fn vault_create(
+    state: State<'_, AppState>,
+    passphrase: String,
+) -> Result<secrets::SecretsStatus, String> {
+    let passphrase = zeroize::Zeroizing::new(passphrase);
+    run_vault(&state, move |v| v.create(&passphrase)).await
+}
+
+#[tauri::command]
+async fn vault_unlock(
+    state: State<'_, AppState>,
+    passphrase: String,
+) -> Result<secrets::SecretsStatus, String> {
+    let passphrase = zeroize::Zeroizing::new(passphrase);
+    run_vault(&state, move |v| v.unlock(&passphrase)).await
+}
+
+#[tauri::command]
+async fn vault_lock(state: State<'_, AppState>) -> Result<secrets::SecretsStatus, String> {
+    run_vault(&state, |v| {
+        v.lock();
+        Ok(())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn vault_change_passphrase(
+    state: State<'_, AppState>,
+    old: String,
+    new: String,
+) -> Result<secrets::SecretsStatus, String> {
+    let (old, new) = (zeroize::Zeroizing::new(old), zeroize::Zeroizing::new(new));
+    run_vault(&state, move |v| v.change_passphrase(&old, &new)).await
+}
+
+/// Deletes the vault and all keys in it. For when the master password is lost.
+#[tauri::command]
+async fn vault_reset(state: State<'_, AppState>) -> Result<secrets::SecretsStatus, String> {
+    run_vault(&state, |v| v.reset()).await
 }
 
 #[tauri::command]
@@ -166,7 +298,7 @@ async fn load_sessions(app: AppHandle) -> Result<Vec<ChatSession>, String> {
     match serde_json::from_str(&content) {
         Ok(sessions) => Ok(sessions),
         Err(e) => {
-            // Không được trả về rỗng rồi để lần save sau ghi đè mất lịch sử
+            // Must not return an empty list: the next save would overwrite and lose the history
             let backup = path.with_extension("json.bak");
             let _ = fs::copy(&path, &backup);
             Err(format!(
@@ -192,8 +324,8 @@ fn stop_chat_command(state: State<'_, AppState>, session_id: String) {
     }
 }
 
-/// Gộp mọi system message thành một (Anthropic chỉ nhận một `system`,
-/// một số server local cũng yêu cầu system nằm đầu và duy nhất).
+/// Merges all system messages into one (Anthropic accepts a single `system`,
+/// and some local servers also require it to come first and be unique).
 fn merge_system_messages(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
     let (system, rest): (Vec<_>, Vec<_>) = messages.into_iter().partition(|m| m.role == "system");
     let mut out = Vec::with_capacity(rest.len() + 1);
@@ -279,7 +411,7 @@ async fn stream_chat_command(
     let tasks = state.tasks.clone();
     let session_id = payload.session_id.clone();
 
-    // Giữ lock tới khi đã đăng ký handle, tránh race với stop_chat_command
+    // Hold the lock until the handle is registered, to avoid racing with stop_chat_command
     let mut tasks_guard = tasks.lock().unwrap();
     if tasks_guard.contains_key(&session_id) {
         return Err("This session is already generating a response".to_string());
@@ -294,7 +426,7 @@ async fn stream_chat_command(
             tasks: Arc<StdMutex<HashMap<String, AbortHandle>>>,
         }
         impl Drop for DoneGuard {
-            // Chạy cả khi task bị abort (nút Stop)
+            // Runs even when the task is aborted (Stop button)
             fn drop(&mut self) {
                 self.tasks.lock().unwrap().remove(&self.session_id);
                 let _ = self.app.emit("chat-done", self.session_id.clone());
@@ -318,7 +450,7 @@ async fn stream_chat_command(
 
         let mut payload = payload;
 
-        // 1. RAG: embed query ngoài lock, chỉ lock lúc chấm điểm
+        // 1. RAG: embed the query outside the lock, only lock while scoring
         let user_query = payload
             .messages
             .iter()
@@ -383,36 +515,34 @@ async fn stream_chat_command(
 pub fn run() {
     #[cfg(target_os = "linux")]
     {
-        // SAFETY: gọi trước khi tạo thread nào khác
+        // SAFETY: called before any other thread is created
         unsafe {
             std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
             std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
         }
     }
 
-    let rag_engine = Arc::new(Mutex::new(RagEngine::new()));
-
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .setup({
-            let rag_engine = rag_engine.clone();
-            move |app| {
-                if let Ok(dir) = app.path().app_data_dir() {
-                    let _ = fs::create_dir_all(&dir);
-                    rag_engine.blocking_lock().init_storage(dir);
-                }
-                Ok(())
-            }
-        })
-        .manage(AppState {
-            rag: rag_engine,
-            http: Client::builder()
-                .connect_timeout(Duration::from_secs(15))
-                .timeout(Duration::from_secs(120))
-                .build()
-                .unwrap_or_else(|_| Client::new()),
-            tasks: Arc::new(StdMutex::new(HashMap::new())),
+        .setup(|app| {
+            let dir = data_dir(app.handle())?;
+
+            let mut rag = RagEngine::new();
+            rag.init_storage(dir.clone());
+
+            app.manage(AppState {
+                rag: Arc::new(Mutex::new(rag)),
+                secrets: secrets::Backend::detect(dir.join("secrets.vault")),
+                unreadable_keys: StdMutex::new(HashSet::new()),
+                http: Client::builder()
+                    .connect_timeout(Duration::from_secs(15))
+                    .timeout(Duration::from_secs(120))
+                    .build()
+                    .unwrap_or_else(|_| Client::new()),
+                tasks: Arc::new(StdMutex::new(HashMap::new())),
+            });
+            Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             stream_chat_command,
@@ -421,6 +551,12 @@ pub fn run() {
             save_sessions,
             load_settings,
             save_settings,
+            secrets_status,
+            vault_create,
+            vault_unlock,
+            vault_lock,
+            vault_change_passphrase,
+            vault_reset,
             index_document_command,
             list_documents,
             delete_document,

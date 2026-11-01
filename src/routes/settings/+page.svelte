@@ -16,7 +16,10 @@
     Plus,
     Copy,
     Trash2,
-    Plug
+    Plug,
+    Lock,
+    LockOpen,
+    ShieldCheck
   } from "@lucide/svelte";
 
   type ConnectionInfo = { models: string[]; modelsListed: boolean; latencyMs: number };
@@ -99,6 +102,90 @@
       embeddingTest = { status: "error", message: String(err) };
     }
   }
+
+  // ---- Security: where API keys are stored ----
+
+  let newPass = $state("");
+  let newPass2 = $state("");
+  let currentPass = $state("");
+  let securityBusy = $state(false);
+  let securityMsg = $state<{ kind: "ok" | "error"; text: string } | null>(null);
+  let showChangeForm = $state(false);
+  let confirmingReset = $state(false);
+
+  const MIN_PASSPHRASE = 8;
+
+  /** Runs a vault action with a busy flag and shows the outcome. */
+  async function securityAction(successText: string, action: () => Promise<void>) {
+    securityBusy = true;
+    securityMsg = null;
+    try {
+      await action();
+      securityMsg = { kind: "ok", text: successText };
+    } catch (err) {
+      securityMsg = { kind: "error", text: String(err) };
+    } finally {
+      securityBusy = false;
+    }
+  }
+
+  function passphraseProblem(pass: string, confirm: string): string {
+    if ([...pass].length < MIN_PASSPHRASE) return `Use at least ${MIN_PASSPHRASE} characters.`;
+    if (pass !== confirm) return "The two passwords don't match.";
+    return "";
+  }
+
+  let createProblem = $derived(newPass ? passphraseProblem(newPass, newPass2) : "");
+  let changeProblem = $derived(newPass ? passphraseProblem(newPass, newPass2) : "");
+
+  function createVault() {
+    return securityAction("Encrypted vault created. Your API keys are now saved in it.", async () => {
+      await settings.createVault(newPass);
+      newPass = newPass2 = "";
+    });
+  }
+
+  function unlockVault() {
+    return securityAction("Vault unlocked.", async () => {
+      await settings.unlockVault(currentPass);
+      currentPass = "";
+    });
+  }
+
+  function lockVault() {
+    return securityAction("Vault locked. Keys were cleared from memory.", () => settings.lockVault());
+  }
+
+  function changePassword() {
+    return securityAction("Master password changed.", async () => {
+      await settings.changePassphrase(currentPass, newPass);
+      currentPass = newPass = newPass2 = "";
+      showChangeForm = false;
+    });
+  }
+
+  function resetVault() {
+    if (!confirmingReset) {
+      confirmingReset = true;
+      return;
+    }
+    confirmingReset = false;
+    return securityAction("Vault deleted. You can create a new one below.", () => settings.resetVault());
+  }
+
+  // What to tell the user about where this key goes
+  let keyHint = $derived.by(() => {
+    switch (settings.secretsStatus) {
+      case "keychain":
+        return { warn: false, text: "API keys are stored in your operating system's keychain, not in the settings file." };
+      case "vault-unlocked":
+        return { warn: false, text: "API keys are stored in your encrypted vault, not in the settings file." };
+      case "vault-locked":
+        return { warn: true, text: "The vault is locked. Unlock it in the Security section below to load and save keys." };
+      case "vault-missing":
+        return { warn: true, text: "No OS keychain is available, so this key is NOT saved. Set a master password in the Security section below." };
+    }
+  });
 
   function deleteProfile() {
     if (!confirmingDelete) {
@@ -280,7 +367,13 @@
               {#if showKey}<EyeOff class="w-3.5 h-3.5" />{:else}<Eye class="w-3.5 h-3.5" />{/if}
             </button>
           </div>
-          <p class="text-[10px] text-zinc-600">The key is stored as plain text in this app's data folder on this machine.</p>
+          {#if settings.keychainWarning}
+            <p class="text-[11px] text-amber-400 flex items-start gap-1.5">
+              <AlertTriangle class="w-3.5 h-3.5 mt-px shrink-0" />
+              <span>{settings.keychainWarning}</span>
+            </p>
+          {/if}
+          <p class="text-[10px] {keyHint.warn ? 'text-amber-400' : 'text-zinc-600'}">{keyHint.text}</p>
         </div>
       {/if}
 
@@ -406,6 +499,131 @@
         </div>
         {@render testBadge(embeddingTest)}
       </div>
+    </section>
+
+    <!-- Security -->
+    <section class="flex flex-col gap-4 border-t border-zinc-800/60 pt-6">
+      <div>
+        <h2 class="font-bold text-sm flex items-center gap-2">
+          <ShieldCheck class="w-4 h-4 text-emerald-400" /> Security
+        </h2>
+        <p class="text-[11px] text-zinc-500 mt-0.5 leading-relaxed">
+          API keys are never written to disk as plain text.
+        </p>
+      </div>
+
+      {#if settings.secretsStatus === "keychain"}
+        <div class="flex items-start gap-2 text-xs text-emerald-300 bg-emerald-500/10 border border-emerald-500/30 rounded-xl px-3 py-2.5">
+          <Check class="w-3.5 h-3.5 mt-px shrink-0" />
+          <span>Your operating system's keychain is available and is used to store API keys. Nothing else to set up.</span>
+        </div>
+      {:else}
+        <p class="text-[11px] text-zinc-400 leading-relaxed">
+          No OS keychain is available on this system (on Linux this is usually a missing GNOME Keyring or KWallet).
+          API keys are kept in an encrypted vault instead, protected by a master password you choose.
+          It uses Argon2id and XChaCha20-Poly1305; the password itself is never stored.
+        </p>
+
+        {#if settings.secretsStatus === "vault-missing"}
+          <div class="flex items-start gap-2 text-xs text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-xl px-3 py-2.5">
+            <AlertTriangle class="w-3.5 h-3.5 mt-px shrink-0" />
+            <span>No vault yet, so API keys are <b>not being saved</b>. Create one to keep them between sessions.</span>
+          </div>
+
+          <div class="flex flex-col gap-2">
+            <label for="new-pass" class={labelClass}>Master password</label>
+            <input id="new-pass" type="password" bind:value={newPass} autocomplete="new-password" class={inputClass} />
+            <label for="new-pass2" class={labelClass}>Confirm master password</label>
+            <input id="new-pass2" type="password" bind:value={newPass2} autocomplete="new-password" class={inputClass} />
+            {#if createProblem}<p class="text-[11px] text-amber-400">{createProblem}</p>{/if}
+            <p class="text-[10px] text-zinc-600">If you forget this password your keys cannot be recovered. You would have to reset the vault and enter them again.</p>
+            <div>
+              <button onclick={createVault} disabled={!newPass || !!createProblem || securityBusy} class={iconBtnClass}>
+                {#if securityBusy}<Loader2 class="w-3.5 h-3.5 animate-spin" />{:else}<Lock class="w-3.5 h-3.5 text-emerald-400" />{/if}
+                Create encrypted vault
+              </button>
+            </div>
+          </div>
+
+        {:else if settings.secretsStatus === "vault-locked"}
+          <div class="flex items-start gap-2 text-xs text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-xl px-3 py-2.5">
+            <Lock class="w-3.5 h-3.5 mt-px shrink-0" />
+            <span>The vault is locked. Enter the master password to use your API keys.</span>
+          </div>
+          <div class="flex gap-2">
+            <input
+              type="password"
+              bind:value={currentPass}
+              onkeydown={(e) => e.key === "Enter" && !e.isComposing && currentPass && unlockVault()}
+              placeholder="Master password"
+              aria-label="Master password"
+              autocomplete="current-password"
+              class={inputClass}
+            />
+            <button onclick={unlockVault} disabled={!currentPass || securityBusy} class={iconBtnClass}>
+              {#if securityBusy}<Loader2 class="w-3.5 h-3.5 animate-spin" />{:else}<LockOpen class="w-3.5 h-3.5 text-emerald-400" />{/if}
+              Unlock
+            </button>
+          </div>
+
+        {:else}
+          <div class="flex items-start gap-2 text-xs text-emerald-300 bg-emerald-500/10 border border-emerald-500/30 rounded-xl px-3 py-2.5">
+            <LockOpen class="w-3.5 h-3.5 mt-px shrink-0" />
+            <span>The encrypted vault is unlocked. API keys are saved in it.</span>
+          </div>
+          <div class="flex flex-wrap gap-2">
+            <button onclick={lockVault} disabled={securityBusy} class={iconBtnClass}>
+              <Lock class="w-3.5 h-3.5" /> Lock now
+            </button>
+            <button onclick={() => (showChangeForm = !showChangeForm)} class={iconBtnClass}>
+              Change master password
+            </button>
+          </div>
+
+          {#if showChangeForm}
+            <div class="flex flex-col gap-2 border border-zinc-800/80 rounded-xl p-3">
+              <input type="password" bind:value={currentPass} placeholder="Current password" aria-label="Current password" autocomplete="current-password" class={inputClass} />
+              <input type="password" bind:value={newPass} placeholder="New password" aria-label="New password" autocomplete="new-password" class={inputClass} />
+              <input type="password" bind:value={newPass2} placeholder="Confirm new password" aria-label="Confirm new password" autocomplete="new-password" class={inputClass} />
+              {#if changeProblem}<p class="text-[11px] text-amber-400">{changeProblem}</p>{/if}
+              <div>
+                <button onclick={changePassword} disabled={!currentPass || !newPass || !!changeProblem || securityBusy} class={iconBtnClass}>
+                  {#if securityBusy}<Loader2 class="w-3.5 h-3.5 animate-spin" />{/if}
+                  Change password
+                </button>
+              </div>
+            </div>
+          {/if}
+        {/if}
+
+        {#if settings.secretsStatus !== "vault-missing"}
+          <div class="flex flex-col gap-1.5 border-t border-zinc-800/60 pt-4">
+            <p class="text-[10px] text-zinc-600">Forgot the master password? The only option is to delete the vault and enter your API keys again.</p>
+            <div>
+              <button
+                onclick={resetVault}
+                onblur={() => (confirmingReset = false)}
+                disabled={securityBusy}
+                class="{iconBtnClass} {confirmingReset ? '!bg-red-500/20 !border-red-500/50 !text-red-300' : ''}"
+              >
+                <Trash2 class="w-3.5 h-3.5" />
+                {confirmingReset ? "Click again to delete all saved keys" : "Reset vault"}
+              </button>
+            </div>
+          </div>
+        {/if}
+
+        {#if securityMsg}
+          <div
+            class="flex items-start gap-2 text-xs rounded-xl px-3 py-2.5 border break-words
+            {securityMsg.kind === 'ok' ? 'text-emerald-300 bg-emerald-500/10 border-emerald-500/30' : 'text-red-300 bg-red-500/10 border-red-500/30'}"
+            role="status"
+          >
+            {#if securityMsg.kind === "ok"}<Check class="w-3.5 h-3.5 mt-px shrink-0" />{:else}<AlertCircle class="w-3.5 h-3.5 mt-px shrink-0" />{/if}
+            <span class="min-w-0">{securityMsg.text}</span>
+          </div>
+        {/if}
+      {/if}
     </section>
   </main>
 </div>

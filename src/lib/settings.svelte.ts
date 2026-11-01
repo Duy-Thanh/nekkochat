@@ -23,6 +23,12 @@ type StoredSettings = {
   model?: string;
 };
 
+/**
+ * Where API keys are kept. "keychain" is the OS credential store. When there is none, an
+ * encrypted vault protected by a master password is used instead.
+ */
+export type SecretsStatus = "keychain" | "vault-unlocked" | "vault-locked" | "vault-missing";
+
 export type SaveState = "idle" | "pending" | "saving" | "saved" | "error";
 
 export const PROVIDERS = [
@@ -63,6 +69,11 @@ class SettingsStore {
   loaded = $state(false);
   saveState = $state<SaveState>("idle");
   saveError = $state("");
+  /** Set when API keys could not be saved or read from secure storage. */
+  keychainWarning = $state("");
+  secretsStatus = $state<SecretsStatus>("keychain");
+  /** The user chose "continue without keys" on the unlock prompt for this session. */
+  unlockDismissed = $state(false);
 
   #loading: Promise<void> | null = null;
   #savedTimer: ReturnType<typeof setTimeout> | undefined;
@@ -117,8 +128,16 @@ class SettingsStore {
 
   async #doLoad() {
     try {
-      const saved = await invoke<StoredSettings | null>("load_settings");
-      if (saved) {
+      const result = await invoke<{
+        settings: StoredSettings;
+        warnings: string[];
+        secrets: SecretsStatus;
+      } | null>("load_settings");
+      if (!result) this.secretsStatus = await invoke<SecretsStatus>("secrets_status");
+      if (result) {
+        const saved = result.settings;
+        this.keychainWarning = result.warnings.join(" ");
+        this.secretsStatus = result.secrets;
         if (saved.profiles?.length) {
           this.profiles = saved.profiles;
           this.activeId = saved.profiles.some((p) => p.id === saved.activeProfileId)
@@ -146,6 +165,58 @@ class SettingsStore {
       console.error("Failed to load settings:", err);
     } finally {
       this.loaded = true;
+    }
+  }
+
+  // ---- Secure storage (OS keychain, or the encrypted vault when there is none) ----
+
+  /** Creates the encrypted vault, then saves so keys typed beforehand are stored in it. */
+  async createVault(passphrase: string) {
+    this.secretsStatus = await invoke<SecretsStatus>("vault_create", { passphrase });
+    await this.#save(this.#snapshot());
+  }
+
+  async unlockVault(passphrase: string) {
+    this.secretsStatus = await invoke<SecretsStatus>("vault_unlock", { passphrase });
+    await this.#restoreKeys();
+  }
+
+  /** Locks the vault and wipes the keys from this window's memory too. */
+  async lockVault() {
+    this.secretsStatus = await invoke<SecretsStatus>("vault_lock");
+    this.#clearKeys();
+    this.unlockDismissed = false;
+  }
+
+  async changePassphrase(oldPassphrase: string, newPassphrase: string) {
+    this.secretsStatus = await invoke<SecretsStatus>("vault_change_passphrase", {
+      old: oldPassphrase,
+      new: newPassphrase
+    });
+  }
+
+  /** Deletes the vault and every key in it (for a forgotten master password). */
+  async resetVault() {
+    this.secretsStatus = await invoke<SecretsStatus>("vault_reset");
+    this.#clearKeys();
+  }
+
+  #clearKeys() {
+    for (const p of this.profiles) p.apiKey = "";
+    this.embedApiKey = "";
+  }
+
+  /** Re-reads keys from secure storage into empty fields, without touching anything else. */
+  async #restoreKeys() {
+    const result = await invoke<{ settings: StoredSettings; warnings: string[] } | null>("load_settings");
+    if (!result) return;
+    this.keychainWarning = result.warnings.join(" ");
+    for (const stored of result.settings.profiles ?? []) {
+      const local = this.profiles.find((p) => p.id === stored.id);
+      if (local && !local.apiKey && stored.apiKey) local.apiKey = stored.apiKey;
+    }
+    if (!this.embedApiKey && result.settings.embedding?.apiKey) {
+      this.embedApiKey = result.settings.embedding.apiKey;
     }
   }
 
@@ -203,7 +274,8 @@ class SettingsStore {
   async #save(snapshot: StoredSettings) {
     this.saveState = "saving";
     try {
-      await invoke("save_settings", { settings: snapshot });
+      const warnings = await invoke<string[]>("save_settings", { settings: snapshot });
+      this.keychainWarning = warnings.join(" ");
       this.saveState = "saved";
       this.saveError = "";
       clearTimeout(this.#savedTimer);

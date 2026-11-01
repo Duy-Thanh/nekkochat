@@ -30,8 +30,8 @@ pub struct ChatSession {
     pub messages: Vec<ChatMessage>,
 }
 
-/// Cấu hình endpoint embedding cho RAG (tách riêng khỏi provider chat,
-/// vì Anthropic không có API embeddings).
+/// Embedding endpoint config for RAG (separate from the chat provider,
+/// because Anthropic has no embeddings API).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EmbeddingConfig {
@@ -75,6 +75,14 @@ pub struct Settings {
     pub api_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsLoad {
+    pub settings: Settings,
+    pub warnings: Vec<String>,
+    pub secrets: crate::secrets::SecretsStatus,
 }
 
 #[derive(Debug, Clone, Serialize)]
