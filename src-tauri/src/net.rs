@@ -26,6 +26,15 @@ pub fn api_client(total_timeout: Option<Duration>) -> Client {
     if let Some(t) = total_timeout {
         builder = builder.timeout(t);
     }
+    #[cfg(target_os = "android")]
+    {
+        // Without this reqwest asks the (uninitialised) Android platform verifier and panics,
+        // which with `panic = "abort"` kills the app on the first request.
+        let roots = webpki_root_certs::TLS_SERVER_ROOT_CERTS
+            .iter()
+            .filter_map(|der| reqwest::Certificate::from_der(der).ok());
+        builder = builder.tls_certs_only(roots);
+    }
     builder.build().unwrap_or_else(|_| Client::new())
 }
 

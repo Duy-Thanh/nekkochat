@@ -509,7 +509,7 @@
         </div>
       {:else}
         <p class="text-[11px] text-zinc-400 leading-relaxed">
-          No OS keychain is available on this system (on Linux this is usually a missing GNOME Keyring or KWallet).
+          No OS keychain is available on this system (on Linux this is usually a missing GNOME Keyring or KWallet; Android has no keychain this app can use).
           API keys are kept in an encrypted vault instead, protected by a master password you choose.
           It uses Argon2id and XChaCha20-Poly1305; the password itself is never stored.
         </p>

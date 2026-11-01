@@ -2562,6 +2562,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tokio",
  "url",
+ "webpki-root-certs",
  "zeroize",
 ]
 

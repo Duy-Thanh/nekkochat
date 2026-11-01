@@ -56,3 +56,8 @@ opt-level = 3
 # on loops such as the RAG similarity search.
 [profile.dev]
 opt-level = 1
+
+# Android has no usable platform certificate verifier from native code (it needs a JNI setup that
+# Tauri does not perform, and reqwest panics without it), so there the app ships Mozilla's roots.
+[target.'cfg(target_os = "android")'.dependencies]
+webpki-root-certs = "1.0.11"
