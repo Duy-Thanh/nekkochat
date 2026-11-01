@@ -58,6 +58,8 @@ impl RagEngine {
                 None => docs.push(DocumentInfo {
                     file_name: c.file_name.clone(),
                     chunks: 1,
+                    model: c.model.clone(),
+                    source_path: c.source_path.clone(),
                 }),
             }
         }
@@ -82,11 +84,24 @@ impl RagEngine {
         Ok(count)
     }
 
-    /// Chấm điểm các chunk theo query embedding đã tính sẵn.
-    pub fn search(&self, query_embedding: &[f32], top_k: usize) -> String {
+    /// A chunk is only comparable with a query embedded by the same model.
+    fn is_compatible(chunk: &DocumentChunk, model: &str) -> bool {
+        !chunk.model.is_empty() && chunk.model == model
+    }
+
+    /// Returns (usable, stale) chunk counts for the given embedding model.
+    pub fn compatibility(&self, model: &str) -> (usize, usize) {
+        let usable = self.chunks.iter().filter(|c| Self::is_compatible(c, model)).count();
+        (usable, self.chunks.len() - usable)
+    }
+
+    /// Scores chunks against an already-computed query embedding. Chunks created by a
+    /// different embedding model are skipped: their vectors are not comparable.
+    pub fn search(&self, query_embedding: &[f32], model: &str, top_k: usize) -> String {
         let mut scored: Vec<(f32, &DocumentChunk)> = self
             .chunks
             .iter()
+            .filter(|c| Self::is_compatible(c, model))
             .map(|c| (cosine_similarity(query_embedding, &c.embedding), c))
             .filter(|(score, _)| *score > MIN_SCORE)
             .collect();
@@ -136,13 +151,11 @@ pub async fn embed(
     let url = embeddings_url(&cfg.base_url);
     let is_nvidia = cfg.base_url.contains("nvidia.com");
 
-    let model = if !cfg.model.is_empty() {
-        cfg.model.as_str()
-    } else if is_nvidia {
-        "nvidia/nemotron-3-embed-1b"
-    } else {
-        "text-embedding-3-small"
-    };
+    // No guessed default: the right model depends entirely on the endpoint
+    let model = cfg.model.trim();
+    if model.is_empty() {
+        return Err("Embedding model is not set. Enter one in Settings > Embedding (RAG).".to_string());
+    }
 
     let mut body = json!({ "input": text, "model": model });
     if is_nvidia {
@@ -261,6 +274,37 @@ mod tests {
     #[test]
     fn empty_input_yields_no_chunks() {
         assert!(chunk_text("  \n\n  ").is_empty());
+    }
+
+    fn chunk(model: &str, embedding: Vec<f32>) -> DocumentChunk {
+        DocumentChunk {
+            file_name: "a.md".into(),
+            content: "hello".into(),
+            embedding,
+            model: model.into(),
+            source_path: String::new(),
+        }
+    }
+
+    #[test]
+    fn search_skips_chunks_from_other_models() {
+        let mut rag = RagEngine::new();
+        rag.chunks = vec![chunk("model-a", vec![1.0, 0.0]), chunk("model-b", vec![1.0, 0.0])];
+        assert_eq!(rag.compatibility("model-a"), (1, 1));
+        let ctx = rag.search(&[1.0, 0.0], "model-a", 5);
+        assert_eq!(ctx.matches("hello").count(), 1);
+        assert!(rag.search(&[1.0, 0.0], "model-c", 5).is_empty());
+    }
+
+    #[test]
+    fn legacy_chunks_without_model_are_stale() {
+        let mut rag = RagEngine::new();
+        rag.chunks = vec![chunk("", vec![1.0, 0.0])];
+        assert_eq!(rag.compatibility(""), (0, 1));
+        assert_eq!(rag.compatibility("model-a"), (0, 1));
+        let legacy: DocumentChunk =
+            serde_json::from_str(r#"{"fileName":"a","content":"c","embedding":[1.0]}"#).unwrap();
+        assert!(legacy.model.is_empty() && legacy.source_path.is_empty());
     }
 
     #[test]

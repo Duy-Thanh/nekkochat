@@ -1,3 +1,4 @@
+mod connection;
 mod providers;
 mod rag;
 mod types;
@@ -93,12 +94,36 @@ async fn index_document_command(
             file_name: file_name.clone(),
             content: text,
             embedding,
+            model: cfg.model.trim().to_string(),
+            source_path: file_path.clone(),
         });
         let _ = app.emit("rag-progress", format!("{}/{}", i + 1, total));
     }
 
     let count = state.rag.lock().await.replace_document(&file_name, chunks)?;
     Ok(format!("Indexed {} chunks from {}", count, file_name))
+}
+
+#[tauri::command]
+async fn test_connection_command(
+    state: State<'_, AppState>,
+    provider: String,
+    base_url: String,
+    api_key: String,
+) -> Result<types::ConnectionInfo, String> {
+    connection::test_connection(&state.http, &provider, &base_url, &api_key).await
+}
+
+#[tauri::command]
+async fn test_embedding_command(
+    state: State<'_, AppState>,
+    provider: String,
+    base_url: String,
+    api_key: String,
+    embedding: EmbeddingConfig,
+) -> Result<String, String> {
+    let cfg = resolve_embedding(&provider, &base_url, &api_key, &embedding);
+    connection::test_embedding(&state.http, &cfg).await
 }
 
 #[tauri::command]
@@ -187,6 +212,62 @@ fn merge_system_messages(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
     out
 }
 
+/// Returns RAG context for `query`, or None when there is nothing usable.
+/// Emits `rag-warning` whenever documents exist but cannot be used, so RAG is never skipped silently.
+async fn rag_context(
+    app: &AppHandle,
+    rag: &Arc<Mutex<RagEngine>>,
+    http: &Client,
+    payload: &ChatPayload,
+    query: &str,
+) -> Option<String> {
+    if rag.lock().await.is_empty() {
+        return None;
+    }
+
+    let cfg = resolve_embedding(
+        &payload.provider,
+        &payload.base_url,
+        &payload.api_key,
+        &payload.embedding,
+    );
+    let model = cfg.model.trim().to_string();
+    let warn = |msg: String| {
+        let _ = app.emit("rag-warning", msg);
+    };
+
+    if model.is_empty() {
+        warn("Documents are indexed but no embedding model is set, so RAG was skipped. Set one in Settings.".into());
+        return None;
+    }
+
+    let (usable, stale) = rag.lock().await.compatibility(&model);
+    if usable == 0 {
+        warn(format!(
+            "All indexed documents were created with a different embedding model than \"{}\", so RAG was skipped. Re-index them.",
+            model
+        ));
+        return None;
+    }
+    if stale > 0 {
+        warn(format!(
+            "{} chunk(s) from documents indexed with another embedding model were skipped. Re-index them.",
+            stale
+        ));
+    }
+
+    match rag::embed(http, &cfg, query, true).await {
+        Ok(q) => {
+            let ctx = rag.lock().await.search(&q, &model, RAG_TOP_K);
+            (!ctx.is_empty()).then_some(ctx)
+        }
+        Err(e) => {
+            warn(format!("RAG skipped: {}", e));
+            None
+        }
+    }
+}
+
 #[tauri::command]
 async fn stream_chat_command(
     app: AppHandle,
@@ -246,27 +327,16 @@ async fn stream_chat_command(
             .map(|m| m.content.clone())
             .unwrap_or_default();
 
-        if !user_query.is_empty() && !rag_engine.lock().await.is_empty() {
-            let cfg = resolve_embedding(
-                &payload.provider,
-                &payload.base_url,
-                &payload.api_key,
-                &payload.embedding,
-            );
-            match rag::embed(&http, &cfg, &user_query, true).await {
-                Ok(q) => {
-                    let ctx = rag_engine.lock().await.search(&q, RAG_TOP_K);
-                    if !ctx.is_empty() {
-                        payload.messages.push(ChatMessage {
-                            role: "system".to_string(),
-                            content: format!(
-                                "Use the document excerpts below to answer if they are relevant:\n{}",
-                                ctx
-                            ),
-                        });
-                    }
-                }
-                Err(e) => eprintln!("[RAG] skipping context due to embedding error: {}", e),
+        if !user_query.is_empty() {
+            if let Some(ctx) = rag_context(&app, &rag_engine, &http, &payload, &user_query).await {
+                payload.messages.push(ChatMessage {
+                    role: "system".to_string(),
+                    content: format!(
+                        "Use the document excerpts below to answer if they are relevant:
+{}",
+                        ctx
+                    ),
+                });
             }
         }
         let messages = merge_system_messages(payload.messages);
@@ -353,7 +423,9 @@ pub fn run() {
             save_settings,
             index_document_command,
             list_documents,
-            delete_document
+            delete_document,
+            test_connection_command,
+            test_embedding_command
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

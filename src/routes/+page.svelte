@@ -25,7 +25,10 @@
     Square,
     RotateCcw,
     Copy,
-    Check
+    Check,
+    AlertTriangle,
+    Pencil,
+    Search
   } from '@lucide/svelte';
 
   type Message = {
@@ -41,7 +44,7 @@
     messages: Message[];
   };
 
-  type DocumentInfo = { fileName: string; chunks: number };
+  type DocumentInfo = { fileName: string; chunks: number; model: string; sourcePath: string };
 
   let inputPrompt = $state("");
 
@@ -59,6 +62,7 @@
   let isIndexing = $state(false);
   let documents = $state<DocumentInfo[]>([]);
   let ragStatusMsg = $state("");
+  let ragStatusIsWarning = $state(false);
   let ragStatusTimer: ReturnType<typeof setTimeout> | undefined;
 
   let isSidebarOpen = $state(false);
@@ -85,10 +89,24 @@
     }, 50);
   }
 
-  function showRagStatus(msg: string, autoClear = true) {
+  function showRagStatus(msg: string, autoClear = true, isWarning = false) {
     clearTimeout(ragStatusTimer);
     ragStatusMsg = msg;
-    if (autoClear) ragStatusTimer = setTimeout(() => ragStatusMsg = "", 4000);
+    ragStatusIsWarning = isWarning;
+    // Warnings stay longer: they explain why documents are not being used
+    if (autoClear) ragStatusTimer = setTimeout(() => ragStatusMsg = "", isWarning ? 10000 : 4000);
+  }
+
+  // A document is stale when it was embedded by a model other than the one currently configured
+  function isStale(doc: DocumentInfo) {
+    return !doc.model || doc.model !== settings.embedding.model;
+  }
+
+  function staleReason(doc: DocumentInfo) {
+    const current = settings.embedding.model || "(not set)";
+    return doc.model
+      ? `Indexed with "${doc.model}", but the current embedding model is ${current}. It is skipped until re-indexed.`
+      : `Indexed by an older version (embedding model unknown). It is skipped until re-indexed.`;
   }
 
   // ---- Persistence ----
@@ -151,6 +169,100 @@
     isPresetModalOpen = false;
   }
 
+  // ---- Chat history sidebar ----
+
+  let historyQuery = $state("");
+  let renamingId = $state<string | null>(null);
+  let renameDraft = $state("");
+  let confirmDeleteId = $state<string | null>(null);
+  let confirmDeleteTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const DAY_MS = 86_400_000;
+
+  // Sorted by last activity and grouped by calendar day. Message content is only read while
+  // searching, so streaming tokens don't recompute this list the rest of the time.
+  let historyGroups = $derived.by(() => {
+    const q = historyQuery.trim().toLowerCase();
+    const matches = sessions.filter(s =>
+      !q || s.title.toLowerCase().includes(q) || s.messages.some(m => m.content.toLowerCase().includes(q))
+    );
+    matches.sort((a, b) => b.updatedAt - a.updatedAt);
+
+    const startOfToday = new Date().setHours(0, 0, 0, 0);
+    const bucket = (ts: number) =>
+      ts >= startOfToday ? "Today"
+      : ts >= startOfToday - DAY_MS ? "Yesterday"
+      : ts >= startOfToday - 7 * DAY_MS ? "Previous 7 days"
+      : "Older";
+
+    const groups: { label: string; items: ChatSession[] }[] = [];
+    for (const sess of matches) {
+      const label = bucket(sess.updatedAt);
+      const last = groups[groups.length - 1];
+      if (last?.label === label) last.items.push(sess);
+      else groups.push({ label, items: [sess] });
+    }
+    return groups;
+  });
+
+  function selectSession(id: string) {
+    currentSessionId = id;
+    isSidebarOpen = false;
+  }
+
+  function newChat() {
+    // Reuse the current chat if it is still empty instead of piling up blank ones
+    if (currentSession && currentSession.messages.length === 0) {
+      isSidebarOpen = false;
+      inputEl?.focus();
+      return;
+    }
+    createNewSession();
+    historyQuery = "";
+  }
+
+  function focusSelect(node: HTMLInputElement) {
+    node.focus();
+    node.select();
+  }
+
+  function startRename(sess: ChatSession, e: Event) {
+    e.stopPropagation();
+    renamingId = sess.id;
+    renameDraft = sess.title;
+  }
+
+  function commitRename() {
+    if (!renamingId) return;
+    const sess = sessions.find(x => x.id === renamingId);
+    const title = renameDraft.trim();
+    if (sess && title && title !== sess.title) {
+      sess.title = title;
+      saveSessions();
+    }
+    renamingId = null;
+  }
+
+  function onRenameKeydown(e: KeyboardEvent) {
+    if (e.isComposing) return;
+    if (e.key === "Enter") commitRename();
+    else if (e.key === "Escape") renamingId = null;
+  }
+
+  // Two-step delete: the first click arms the button, a second click within 3s deletes
+  function requestDelete(id: string, e: Event) {
+    e.stopPropagation();
+    if (confirmDeleteId === id) {
+      clearTimeout(confirmDeleteTimer);
+      confirmDeleteId = null;
+      deleteSession(id, e);
+      return;
+    }
+    confirmDeleteId = id;
+    clearTimeout(confirmDeleteTimer);
+    confirmDeleteTimer = setTimeout(() => confirmDeleteId = null, 3000);
+  }
+
   function deleteSession(id: string, e: Event) {
     e.stopPropagation();
     if (generatingIds.includes(id)) stopGeneration(id);
@@ -203,8 +315,10 @@
       return;
     }
     if (!selected) return;
-    const paths = Array.isArray(selected) ? selected : [selected];
+    await indexPaths(Array.isArray(selected) ? selected : [selected]);
+  }
 
+  async function indexPaths(paths: string[]) {
     isIndexing = true;
     try {
       for (const filePath of paths) {
@@ -220,11 +334,16 @@
       }
     } catch (err) {
       console.error("Indexing error:", err);
-      showRagStatus(`[Indexing error]: ${err}`);
+      showRagStatus(`[Indexing error]: ${err}`, true, true);
     } finally {
       isIndexing = false;
       await refreshDocuments();
     }
+  }
+
+  async function reindexStale() {
+    const paths = documents.filter(d => isStale(d) && d.sourcePath).map(d => d.sourcePath);
+    if (paths.length) await indexPaths(paths);
   }
 
   async function removeDocument(fileName: string) {
@@ -265,6 +384,9 @@
           // Dừng trước khi có token nào: bỏ bubble rỗng
           if (sess && last?.role === "assistant" && !last.content) sess.messages.pop();
           saveSessions();
+        }),
+        listen<string>("rag-warning", (event) => {
+          showRagStatus(event.payload, true, true);
         }),
         listen<string>("rag-progress", (event) => {
           if (isIndexing) showRagStatus(`Creating embeddings ${event.payload}...`, false);
@@ -435,43 +557,130 @@
       </button>
     </div>
 
-    <!-- Nút New Chat -->
-    <button 
-      onclick={() => createNewSession()}
-      class="flex items-center justify-center gap-2 w-full py-2.5 px-4 bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-semibold rounded-xl text-xs transition-all shadow-md shadow-emerald-950/20 cursor-pointer"
+    <!-- New chat -->
+    <button
+      onclick={newChat}
+      class="flex items-center justify-center gap-2 w-full py-2.5 px-4 bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-semibold rounded-xl text-xs transition-all shadow-md shadow-emerald-950/20 cursor-pointer shrink-0"
     >
       <Plus class="w-4 h-4" />
       <span>New chat</span>
     </button>
 
-    <!-- Sessions List (History) -->
-    <div class="flex flex-col gap-1 overflow-y-auto max-h-56 min-h-16 border-b border-zinc-800/60 pb-3 pr-1">
-      <span class="text-[10px] font-semibold text-zinc-500 tracking-wider uppercase px-1 mb-1">Chat History</span>
-      {#each sessions as s (s.id)}
-        <div 
-          onclick={() => currentSessionId = s.id}
-          role="button"
-          tabindex="0"
-          onkeydown={(e) => e.key === 'Enter' && (currentSessionId = s.id)}
-          class="flex items-center justify-between px-3 py-2 rounded-xl text-xs cursor-pointer transition-colors group
-          {s.id === currentSessionId ? 'bg-zinc-800/80 text-zinc-100 font-medium' : 'text-zinc-400 hover:bg-zinc-800/40 hover:text-zinc-200'}"
-        >
-          <div class="flex items-center gap-2 truncate pr-2">
-            <MessageSquare class="w-3.5 h-3.5 text-zinc-500 shrink-0" />
-            <span class="truncate">{s.title}</span>
-          </div>
-          <button 
-            onclick={(e) => deleteSession(s.id, e)}
-            class="opacity-0 group-hover:opacity-100 hover:text-red-400 p-1 transition-opacity"
-            title="Delete conversation"
+    <!-- Chat history: takes all remaining height, profile + settings stay pinned below -->
+    <div class="flex flex-col flex-1 min-h-0">
+      <div class="relative pb-2 shrink-0">
+        <Search class="w-3.5 h-3.5 absolute left-3 top-2.5 text-zinc-500 pointer-events-none" />
+        <input
+          type="text"
+          bind:value={historyQuery}
+          onkeydown={(e) => e.key === "Escape" && (historyQuery = "")}
+          placeholder="Search chats..."
+          aria-label="Search chats"
+          class="w-full bg-[#1a1d24] border border-zinc-800/80 rounded-xl pl-8 pr-8 py-2 text-xs text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-emerald-500/50"
+        />
+        {#if historyQuery}
+          <button
+            onclick={() => historyQuery = ""}
+            title="Clear search"
+            class="absolute right-2 top-2 p-0.5 text-zinc-500 hover:text-zinc-200 cursor-pointer"
           >
-            <Trash2 class="w-3.5 h-3.5" />
+            <X class="w-3.5 h-3.5" />
           </button>
-        </div>
-      {/each}
+        {/if}
+      </div>
+
+      <div class="flex-1 min-h-0 overflow-y-auto -mr-2 pr-2">
+        {#each historyGroups as group (group.label)}
+          <div class="mb-2">
+            <div class="sticky top-0 z-10 bg-[#13151a] text-[10px] font-semibold text-zinc-500 tracking-wider uppercase px-2 py-1">
+              {group.label}
+            </div>
+
+            {#each group.items as s (s.id)}
+              {@const isActive = s.id === currentSessionId}
+              {@const isConfirming = confirmDeleteId === s.id}
+              <div
+                class="group flex items-center rounded-xl transition-colors
+                {isActive ? 'bg-zinc-800/80' : 'hover:bg-zinc-800/40'}"
+              >
+                {#if renamingId === s.id}
+                  <input
+                    use:focusSelect
+                    bind:value={renameDraft}
+                    onkeydown={onRenameKeydown}
+                    onblur={commitRename}
+                    maxlength="80"
+                    aria-label="Chat title"
+                    class="flex-1 min-w-0 mx-1 my-1 bg-[#0e0f12] border border-emerald-500/50 rounded-lg px-2.5 py-1.5 text-xs text-zinc-100 focus:outline-none"
+                  />
+                {:else}
+                  <button
+                    onclick={() => selectSession(s.id)}
+                    ondblclick={(e) => startRename(s, e)}
+                    title={s.title}
+                    aria-current={isActive ? "true" : undefined}
+                    class="flex items-center gap-2 flex-1 min-w-0 px-3 py-2 text-left text-xs cursor-pointer
+                    {isActive ? 'text-zinc-100 font-medium' : 'text-zinc-400 group-hover:text-zinc-200'}"
+                  >
+                    <MessageSquare class="w-3.5 h-3.5 text-zinc-500 shrink-0" />
+                    <span class="truncate">{s.title}</span>
+                    {#if generatingIds.includes(s.id)}
+                      <Loader2 class="w-3 h-3 animate-spin text-emerald-400 shrink-0" aria-label="Generating" />
+                    {/if}
+                  </button>
+
+                  <!-- Always visible on the active/armed item, otherwise on hover or keyboard focus -->
+                  <div
+                    class="flex items-center pr-1 shrink-0 transition-opacity
+                    {isActive || isConfirming ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 focus-within:opacity-100'}"
+                  >
+                    {#if !isConfirming}
+                      <button
+                        onclick={(e) => startRename(s, e)}
+                        title="Rename"
+                        class="p-1.5 rounded-lg text-zinc-500 hover:text-zinc-100 hover:bg-zinc-700/50 cursor-pointer"
+                      >
+                        <Pencil class="w-3.5 h-3.5" />
+                      </button>
+                    {/if}
+                    <button
+                      onclick={(e) => requestDelete(s.id, e)}
+                      onblur={() => confirmDeleteId === s.id && (confirmDeleteId = null)}
+                      title={isConfirming ? "Click again to delete" : "Delete conversation"}
+                      class="flex items-center gap-1 p-1.5 rounded-lg cursor-pointer
+                      {isConfirming ? 'bg-red-500/20 text-red-300 text-[10px] font-semibold px-2' : 'text-zinc-500 hover:text-red-400 hover:bg-zinc-700/50'}"
+                    >
+                      <Trash2 class="w-3.5 h-3.5" />
+                      {#if isConfirming}Delete?{/if}
+                    </button>
+                  </div>
+                {/if}
+              </div>
+            {/each}
+          </div>
+        {:else}
+          <p class="text-[11px] text-zinc-600 text-center px-2 py-6 leading-relaxed">
+            No chats match "{historyQuery}".
+          </p>
+        {/each}
+      </div>
     </div>
 
-    <div class="flex-1"></div>
+    <!-- Quick profile switch -->
+    {#if settings.profiles.length > 1}
+      <div class="flex flex-col gap-1">
+        <label for="profile-quick-switch" class="text-[10px] font-semibold text-zinc-500 tracking-wider uppercase px-1">Profile</label>
+        <select
+          id="profile-quick-switch"
+          bind:value={settings.activeId}
+          class="w-full bg-[#1a1d24] border border-zinc-800/80 rounded-xl px-3 py-2 text-xs font-medium text-zinc-100 focus:outline-none focus:border-emerald-500/50 cursor-pointer"
+        >
+          {#each settings.profiles as p (p.id)}
+            <option value={p.id} class="bg-[#1a1d24] text-zinc-100">{p.name || "(unnamed)"}</option>
+          {/each}
+        </select>
+      </div>
+    {/if}
 
     <!-- Settings entry -->
     <button
@@ -481,7 +690,7 @@
       <SettingsIcon class="w-4 h-4 text-emerald-400 shrink-0" />
       <div class="min-w-0 flex-1">
         <div class="text-xs font-semibold text-zinc-200">Settings</div>
-        <div class="text-[10px] text-zinc-500 font-mono truncate">{settings.provider} · {settings.model}</div>
+        <div class="text-[10px] text-zinc-500 font-mono truncate">{settings.active.name} · {settings.model || "no model"}</div>
       </div>
     </button>
 
@@ -534,7 +743,7 @@
 
       {#if settings.loaded && !settings.isConfigured}
         <div class="max-w-xl mx-auto flex items-center justify-between gap-3 text-xs text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-xl px-4 py-3">
-          <span>No API key set for provider "{settings.provider}".</span>
+          <span>No API key set for profile "{settings.active.name}".</span>
           <button onclick={() => goto("/settings")} class="font-semibold underline underline-offset-2 hover:text-amber-200 cursor-pointer shrink-0">
             Open Settings
           </button>
@@ -627,24 +836,50 @@
     <!-- Floating Input Box & RAG File Indexer -->
     <div class="p-4 md:p-6 bg-gradient-to-t from-[#0e0f12] via-[#0e0f12]/90 to-transparent shrink-0">
       <div class="max-w-3xl mx-auto flex flex-col gap-2">
-        {#if documents.length > 0 || ragStatusMsg}
-          <div class="flex items-center gap-2 overflow-x-auto py-1 px-1 text-xs">
-            {#if ragStatusMsg}
-              <span class="text-[11px] text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 px-2.5 py-1 rounded-lg flex items-center gap-1.5 font-mono">
-                {#if isIndexing}
-                  <Loader2 class="w-3 h-3 animate-spin" />
-                {/if}
-                {ragStatusMsg}
-              </span>
+        {#if ragStatusMsg}
+          <div
+            class="text-[11px] px-2.5 py-1.5 rounded-lg flex items-start gap-1.5 font-mono border break-words
+            {ragStatusIsWarning
+              ? 'text-amber-300 bg-amber-500/10 border-amber-500/30'
+              : 'text-emerald-400 bg-emerald-500/10 border-emerald-500/30'}"
+            role="status"
+          >
+            {#if isIndexing}
+              <Loader2 class="w-3 h-3 mt-0.5 animate-spin shrink-0" />
+            {:else if ragStatusIsWarning}
+              <AlertTriangle class="w-3 h-3 mt-0.5 shrink-0" />
             {/if}
+            <span class="min-w-0">{ragStatusMsg}</span>
+          </div>
+        {/if}
 
+        {#if documents.length > 0}
+          <div class="flex items-center gap-2 overflow-x-auto py-1 px-1 text-xs">
             {#each documents as doc (doc.fileName)}
+              {@const stale = isStale(doc)}
               <span
-                class="text-[11px] text-zinc-300 bg-zinc-800/80 border border-zinc-700/50 pl-2.5 pr-1 py-0.5 rounded-lg flex items-center gap-1.5 font-mono shrink-0"
-                title="{doc.chunks} chunks"
+                class="text-[11px] pl-2.5 pr-1 py-0.5 rounded-lg flex items-center gap-1.5 font-mono shrink-0 border
+                {stale
+                  ? 'text-amber-300 bg-amber-500/10 border-amber-500/30'
+                  : 'text-zinc-300 bg-zinc-800/80 border-zinc-700/50'}"
+                title={stale ? staleReason(doc) : `${doc.chunks} chunks · ${doc.model}`}
               >
-                <FileText class="w-3 h-3 text-emerald-400" />
+                {#if stale}
+                  <AlertTriangle class="w-3 h-3" />
+                {:else}
+                  <FileText class="w-3 h-3 text-emerald-400" />
+                {/if}
                 <span>{doc.fileName}</span>
+                {#if stale && doc.sourcePath}
+                  <button
+                    onclick={reindexStale}
+                    disabled={isIndexing}
+                    title="Re-index all outdated documents"
+                    class="px-1.5 py-0.5 rounded bg-amber-500/20 hover:bg-amber-500/30 cursor-pointer disabled:opacity-50"
+                  >
+                    Re-index
+                  </button>
+                {/if}
                 <button
                   onclick={() => removeDocument(doc.fileName)}
                   title="Remove from RAG"
