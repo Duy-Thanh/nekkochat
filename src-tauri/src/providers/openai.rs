@@ -13,7 +13,7 @@ pub struct OpenAiProvider {
 impl OpenAiProvider {
     pub fn new() -> Self {
         let client = Client::builder()
-            // Không đặt timeout tổng: stream dài sẽ bị cắt. Timeout theo từng chunk nằm ở lib.rs
+            // No overall timeout: it would cut long streams. The per-chunk timeout lives in lib.rs
             .connect_timeout(std::time::Duration::from_secs(15))
             .tcp_keepalive(std::time::Duration::from_secs(30))
             .build()
@@ -79,7 +79,7 @@ impl LlmProvider for OpenAiProvider {
                             .as_str()
                             .or_else(|| delta["reasoning"].as_str())
                         {
-                            // Bọc reasoning content trong tag <think> để frontend dễ parse
+                            // Wrap reasoning content in <think> tags so the frontend can parse it
                             Some(Ok(format!("<think>{}</think>", reasoning)))
                         } else {
                             None

@@ -51,7 +51,7 @@
   // Sessions State
   let sessions = $state<ChatSession[]>([]);
   let currentSessionId = $state<string>("");
-  // Mỗi session stream độc lập nên có thể chuyển session trong lúc đang trả lời
+  // Each session streams independently, so the user can switch chats while one is generating
   let generatingIds = $state<string[]>([]);
   let loadError = $state("");
 
@@ -137,7 +137,7 @@
     }
   }
 
-  // Ghi đĩa theo nhịp thay vì mỗi token
+  // Write to disk on a timer instead of on every token
   let saveTimer: ReturnType<typeof setTimeout> | undefined;
   function queueSaveSessions() {
     if (saveTimer) return;
@@ -381,7 +381,7 @@
           generatingIds = generatingIds.filter(x => x !== id);
           const sess = sessions.find(s => s.id === id);
           const last = sess?.messages[sess.messages.length - 1];
-          // Dừng trước khi có token nào: bỏ bubble rỗng
+          // Stopped before any token arrived: drop the empty bubble
           if (sess && last?.role === "assistant" && !last.content) sess.messages.pop();
           saveSessions();
         }),
@@ -428,7 +428,7 @@
     generatingIds = [...generatingIds, sess.id];
     scrollToBottom();
 
-    // Bỏ phần <think> khỏi history và các tin nhắn assistant rỗng
+    // Strip <think> blocks and empty assistant messages from the history
     const context: Message[] = sess.messages
       .slice(0, -1)
       .map(m => m.role === "assistant" ? { role: m.role, content: parseThinking(m.content).answer } : m)
@@ -482,7 +482,7 @@
   }
 
   function onInputKeydown(e: KeyboardEvent) {
-    // isComposing: không gửi khi đang gõ dở Telex/VNI/IME
+    // isComposing: don't send while an IME (Telex/VNI/etc.) composition is in progress
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
       sendMessage();

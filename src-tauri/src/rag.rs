@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 const MAX_CHUNK_CHARS: usize = 1200;
 const MIN_SCORE: f32 = 0.25;
 
-/// Store chỉ giữ vector + file trên đĩa. Việc gọi mạng embedding nằm ngoài
-/// struct này để không giữ mutex trong lúc chờ API (chat vẫn chạy khi đang index).
+/// The store only holds vectors and the on-disk file. Embedding network calls live outside
+/// this struct so the mutex is not held while waiting on the API (chat keeps working during indexing).
 pub struct RagEngine {
     chunks: Vec<DocumentChunk>,
     storage_path: Option<PathBuf>,
@@ -24,7 +24,7 @@ impl RagEngine {
         }
     }
 
-    // Set đường dẫn lưu rag_store.json và tự động load vector cũ lên RAM
+    // Sets the rag_store.json path and loads previously saved vectors into memory
     pub fn init_storage(&mut self, app_dir: PathBuf) {
         let store_file = app_dir.join("rag_store.json");
         self.storage_path = Some(store_file.clone());
@@ -33,7 +33,7 @@ impl RagEngine {
             match serde_json::from_str::<Vec<DocumentChunk>>(&content) {
                 Ok(saved) => self.chunks = saved,
                 Err(e) => {
-                    // Không ghi đè file hỏng: giữ lại bản backup cho user
+                    // Never overwrite a corrupted file: keep a backup for the user
                     eprintln!("[RAG] rag_store.json is corrupted ({}); backed up to .bak", e);
                     let _ = fs::rename(&store_file, store_file.with_extension("json.bak"));
                 }
@@ -71,7 +71,7 @@ impl RagEngine {
         self.save_to_disk()
     }
 
-    /// Thay toàn bộ chunk cũ của file bằng chunk mới (index lại không bị trùng).
+    /// Replaces all existing chunks of a file with new ones (re-indexing creates no duplicates).
     pub fn replace_document(
         &mut self,
         file_name: &str,
@@ -138,7 +138,7 @@ fn embeddings_url(base_url: &str) -> String {
     }
 }
 
-/// `is_query`: các model bất đối xứng của NVIDIA cần phân biệt query / passage.
+/// `is_query`: NVIDIA's asymmetric models need to tell queries and passages apart.
 pub async fn embed(
     client: &Client,
     cfg: &EmbeddingConfig,
@@ -159,7 +159,7 @@ pub async fn embed(
 
     let mut body = json!({ "input": text, "model": model });
     if is_nvidia {
-        // OpenAI chuẩn sẽ từ chối field lạ, nên chỉ gửi cho NVIDIA NIM
+        // Standard OpenAI rejects unknown fields, so only send this to NVIDIA NIM
         body["input_type"] = json!(if is_query { "query" } else { "passage" });
     }
 
@@ -192,7 +192,7 @@ pub async fn embed(
         .ok_or_else(|| "Embedding API returned empty data array".to_string())
 }
 
-/// Đọc file và cắt thành các chunk <= MAX_CHUNK_CHARS (gộp đoạn ngắn, tách đoạn dài).
+/// Reads a file and splits it into chunks of at most MAX_CHUNK_CHARS (merges short paragraphs, splits long ones).
 pub fn read_and_chunk(path: &Path) -> Result<(String, Vec<String>), String> {
     let file_name = path
         .file_name()
@@ -222,7 +222,7 @@ fn chunk_text(content: &str) -> Vec<String> {
     };
 
     for para in content.split("\n\n").map(str::trim).filter(|p| !p.is_empty()) {
-        // Đoạn quá dài: tách cứng theo số ký tự, đúng ranh giới char
+        // Paragraph too long: hard split by character count, on char boundaries
         if para.chars().count() > MAX_CHUNK_CHARS {
             flush(&mut current, &mut chunks);
             let chars: Vec<char> = para.chars().collect();
@@ -264,7 +264,7 @@ mod tests {
 
     #[test]
     fn hard_splits_long_paragraph_on_char_boundary() {
-        // Tiếng Việt nhiều byte/ký tự: không được panic khi cắt
+        // Multi-byte characters (e.g. Vietnamese): splitting must not panic
         let text = "ệ".repeat(MAX_CHUNK_CHARS * 2 + 5);
         let chunks = chunk_text(&text);
         assert_eq!(chunks.len(), 3);

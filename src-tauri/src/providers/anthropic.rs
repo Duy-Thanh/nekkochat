@@ -13,7 +13,7 @@ pub struct AnthropicProvider {
 impl AnthropicProvider {
     pub fn new() -> Self {
         let client = Client::builder()
-                    // Không đặt timeout tổng: stream dài sẽ bị cắt. Timeout theo từng chunk nằm ở lib.rs
+                    // No overall timeout: it would cut long streams. The per-chunk timeout lives in lib.rs
                     .connect_timeout(Duration::from_secs(15))
             .tcp_keepalive(std::time::Duration::from_secs(30))
                     .build()
@@ -34,7 +34,7 @@ impl LlmProvider for AnthropicProvider {
     ) -> Result<ChunkStream, String> {
         let url = format!("{}/messages", base_url.trim_end_matches('/'));
 
-        // Anthropic tách system prompt ra ngoài array messages
+        // Anthropic takes the system prompt outside the messages array
         let mut system_prompt = String::new();
         let filtered_messages: Vec<serde_json::Value> = messages
             .into_iter()

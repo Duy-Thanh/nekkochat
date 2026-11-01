@@ -26,8 +26,8 @@ pub fn get_provider(provider_type: &str) -> Result<Box<dyn LlmProvider>, String>
         _ => Err(format!("Unsupported provider: {}", provider_type)),
     }
 }
-/// Nối cả chuỗi `source()` để thấy nguyên nhân gốc (reset, timeout, h2...) thay vì
-/// chỉ lớp ngoài cùng kiểu "error decoding response body".
+/// Joins the whole `source()` chain so the root cause (reset, timeout, h2...) is visible
+/// instead of just the outermost layer such as "error decoding response body".
 pub fn error_chain(e: &dyn std::error::Error) -> String {
     let mut msg = e.to_string();
     let mut cur = e.source();

@@ -24,7 +24,7 @@
 
   let { content = '' } = $props();
 
-  // Link trong chat mở bằng trình duyệt hệ thống, không điều hướng webview của app
+  // Open chat links in the system browser instead of navigating the app's webview
   function handleClick(e: MouseEvent) {
     const anchor = (e.target as HTMLElement).closest('a');
     if (!anchor) return;
@@ -33,7 +33,7 @@
     if (href && /^(https?:|mailto:)/i.test(href)) openUrl(href).catch(console.error);
   }
 
-  // Output của model là nội dung không tin cậy -> luôn sanitize trước khi {@html}
+  // Model output is untrusted content, so always sanitize it before {@html}
   let renderedHtml = $derived(DOMPurify.sanitize(marked.parse(content) as string));
 </script>
 
