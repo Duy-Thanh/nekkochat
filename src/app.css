@@ -1,1 +1,41 @@
 @import "tailwindcss";
+
+/* Dark native controls: scrollbars, <select> popups, form fields */
+:root {
+  color-scheme: dark;
+}
+
+/*
+ * One scrollbar style for every scrollable area (chat, sidebar, code blocks, chips, textarea...).
+ * Chromium/WebView2 (121+) and modern WebKit honour the standard properties; older engines fall
+ * back to the ::-webkit-scrollbar rules below. Browsers that support the standard properties
+ * ignore the webkit pseudo-elements, so the two never conflict.
+ */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #3f3f46 transparent;
+}
+
+@supports not (scrollbar-color: auto) {
+  *::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  *::-webkit-scrollbar-track,
+  *::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background-color: #3f3f46;
+    border-radius: 9999px;
+    /* transparent border keeps the thumb slim and inset from the edge */
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+
+  *::-webkit-scrollbar-thumb:hover {
+    background-color: #52525b;
+  }
+}
