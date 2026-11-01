@@ -1,45 +1,27 @@
-<script module lang="ts">
-  import { marked } from 'marked';
-  import DOMPurify from 'dompurify';
-  import hljs from 'highlight.js/lib/common';
-  import 'highlight.js/styles/github-dark.css';
-
-  marked.use({
-    gfm: true,
-    breaks: true,
-    renderer: {
-      code({ text, lang }) {
-        const language = lang && hljs.getLanguage(lang) ? lang : undefined;
-        const html = language
-          ? hljs.highlight(text, { language }).value
-          : hljs.highlightAuto(text).value;
-        return `<pre><code class="hljs${language ? ` language-${language}` : ''}">${html}</code></pre>`;
-      }
-    }
-  });
-</script>
-
 <script lang="ts">
+  import 'highlight.js/styles/github-dark.css';
   import { openUrl } from '@tauri-apps/plugin-opener';
+  import { renderMarkdown } from '$lib/markdown';
 
   let { content = '' } = $props();
 
-  // Open chat links in the system browser instead of navigating the app's webview
+  // Open chat links in the system browser instead of navigating the app's webview.
+  // Handles middle-click too, which would otherwise try to open a new window.
   function handleClick(e: MouseEvent) {
     const anchor = (e.target as HTMLElement).closest('a');
     if (!anchor) return;
     e.preventDefault();
     const href = anchor.getAttribute('href');
-    if (href && /^(https?:|mailto:)/i.test(href)) openUrl(href).catch(console.error);
+    if (e.button <= 1 && href && /^(https?:|mailto:)/i.test(href)) openUrl(href).catch(console.error);
   }
 
-  // Model output is untrusted content, so always sanitize it before {@html}
-  let renderedHtml = $derived(DOMPurify.sanitize(marked.parse(content) as string));
+  // Model output is untrusted content; renderMarkdown sanitizes it before {@html}
+  let renderedHtml = $derived(renderMarkdown(content));
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div onclick={handleClick} class="markdown-body max-w-none text-xs md:text-sm leading-relaxed whitespace-normal">
+<div onclick={handleClick} onauxclick={handleClick} class="markdown-body max-w-none text-xs md:text-sm leading-relaxed whitespace-normal">
   {@html renderedHtml}
 </div>
 
