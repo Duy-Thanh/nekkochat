@@ -38,9 +38,21 @@ url = "2.5.8"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
+# Speed over size: the release build is optimised for run time, not for binary size.
 [profile.release]
-codegen-units = 1
-lto = true
 opt-level = 3
-panic = "abort"
-strip = true
+lto = "fat"          # whole-program optimisation across all crates
+codegen-units = 1    # one unit lets LLVM inline and optimise across the whole crate
+panic = "abort"      # no unwinding tables, and no unwinding cost on the hot paths
+strip = true         # symbols only add size and have no effect on speed
+
+# `tauri dev` and `cargo test` build with the dev profile, where dependencies are normally not
+# optimised at all. Argon2 (the vault) and the cryptography crates are then roughly 10x slower
+# than in a release build. Optimise every dependency, but keep our own code debuggable.
+[profile.dev.package."*"]
+opt-level = 3
+
+# Our own code in `tauri dev`: level 1 is still easy to debug but about 10x faster than level 0
+# on loops such as the RAG similarity search.
+[profile.dev]
+opt-level = 1

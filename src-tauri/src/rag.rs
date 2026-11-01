@@ -588,4 +588,27 @@ mod tests {
         assert_eq!(embeddings_url("http://localhost:11434"), "http://localhost:11434/v1/embeddings");
         assert_eq!(embeddings_url("https://a.com/v1/embeddings"), "https://a.com/v1/embeddings");
     }
+
+    /// Prints how long a search over 5000 chunks of 1536 dimensions takes.
+    /// Run: `cargo test --release search_timing -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn search_timing() {
+        let dims = 1536;
+        let mut rag = RagEngine::new();
+        rag.chunks = (0..5000)
+            .map(|i| {
+                let v: Vec<f32> = (0..dims).map(|d| (((i * 31 + d * 17) % 997) as f32) / 997.0 - 0.5).collect();
+                chunk("m", v)
+            })
+            .collect();
+        let query: Vec<f32> = (0..dims).map(|d| ((d * 13 % 991) as f32) / 991.0 - 0.5).collect();
+
+        let t = std::time::Instant::now();
+        let runs = 20;
+        for _ in 0..runs {
+            std::hint::black_box(rag.search(&query, "m", 3));
+        }
+        println!("[timing] search over 5000x{}: {:.2} ms per query", dims, t.elapsed().as_secs_f64() * 1000.0 / runs as f64);
+    }
 }

@@ -520,4 +520,19 @@ mod tests {
         let file: VaultFile = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
         assert_eq!((file.m_cost, file.t_cost, file.p_cost), (65536, 3, 1));
     }
+
+    /// Prints how long the vault takes with the production parameters.
+    /// Run: `cargo test --release kdf_timing -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn kdf_timing() {
+        let v = Vault::open(temp_path());
+        let t = std::time::Instant::now();
+        v.create("correct horse battery").unwrap();
+        println!("[timing] vault create: {} ms", t.elapsed().as_millis());
+        v.lock();
+        let t = std::time::Instant::now();
+        v.unlock("correct horse battery").unwrap();
+        println!("[timing] vault unlock: {} ms", t.elapsed().as_millis());
+    }
 }
