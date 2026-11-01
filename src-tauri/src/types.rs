@@ -9,11 +9,14 @@ pub struct ChatMessage {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatPayload {
+    pub session_id: String,
     pub provider: String,
     pub base_url: String,
     pub api_key: String,
     pub model: String,
     pub messages: Vec<ChatMessage>,
+    #[serde(default)]
+    pub embedding: EmbeddingConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,7 +25,33 @@ pub struct ChatSession {
     pub id: String,
     pub title: String,
     pub updated_at: u64,
+    #[serde(default)]
+    pub system_prompt: String,
     pub messages: Vec<ChatMessage>,
+}
+
+/// Cấu hình endpoint embedding cho RAG (tách riêng khỏi provider chat,
+/// vì Anthropic không có API embeddings).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddingConfig {
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default)]
+    pub model: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Settings {
+    pub provider: String,
+    pub base_url: String,
+    pub api_key: String,
+    pub model: String,
+    #[serde(default)]
+    pub embedding: EmbeddingConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,9 +62,18 @@ pub struct DocumentChunk {
     pub embedding: Vec<f32>,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct OllamaEmbeddingResponse {
-    pub embedding: Vec<f32>,
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentInfo {
+    pub file_name: String,
+    pub chunks: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChunkEvent {
+    pub session_id: String,
+    pub text: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,10 +99,3 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     }
     dot_product / (norm_a * norm_b)
 }
-
-// #[derive(Debug, Clone, Serialize)]
-// pub enum StreamChunk {
-//     Content(String),
-//     Error(String),
-//     Done,
-// }

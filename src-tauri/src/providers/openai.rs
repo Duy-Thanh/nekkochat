@@ -13,8 +13,9 @@ pub struct OpenAiProvider {
 impl OpenAiProvider {
     pub fn new() -> Self {
         let client = Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .timeout(std::time::Duration::from_secs(30))
+            // Không đặt timeout tổng: stream dài sẽ bị cắt. Timeout theo từng chunk nằm ở lib.rs
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .tcp_keepalive(std::time::Duration::from_secs(30))
             .build()
             .unwrap_or_else(|_| Client::new());
 
@@ -40,48 +41,27 @@ impl LlmProvider for OpenAiProvider {
             format!("{}/v1/chat/completions", clean_base)
         };
 
-        println!("\n========== [NEKKOCHAT DEBUG REQUEST] ==========");
-        println!("[1] Final Target URL: {}", url);
-        println!("[2] Model: {}", model);
-        println!("[3] API Key Length: {}", api_key.len());
-
         let body = json!({
             "model": model,
             "messages": messages,
             "stream": true
         });
 
-        println!("[4] Payload JSON:\n{}", serde_json::to_string_pretty(&body).unwrap_or_default());
-
         let mut req = self.client.post(&url).json(&body);
         if !api_key.is_empty() {
             req = req.bearer_auth(api_key);
         }
 
-        println!("[5] Sending HTTP Request...");
         let res = req
             .send()
             .await
-            .map_err(|e| {
-                let err_msg = format!("Network/Connect error to {}: {}", url, e);
-                println!("[E] {}", err_msg);
-                err_msg
-            })?;
+            .map_err(|e| format!("Network/Connect error to {}: {}", url, e))?;
 
         let status = res.status();
-        let headers = res.headers().clone();
-        println!("[6] Response HTTP Status: {}", status);
-        println!("[7] Response Content-Type: {:?}", headers.get("content-type"));
-
         if !status.is_success() {
             let err_text = res.text().await.unwrap_or_default();
-            println!("[E] API Error Response Body:\n{}", err_text);
-            println!("================================================\n");
             return Err(format!("API Error [HTTP {}]: {}", status, err_text));
         }
-
-        println!("[8] Status 200 OK! Constructing SSE stream...");
-        println!("================================================\n");
 
         let event_stream = res.bytes_stream().eventsource();
 
@@ -95,7 +75,10 @@ impl LlmProvider for OpenAiProvider {
                         
                         if let Some(content) = delta["content"].as_str() {
                             Some(Ok(content.to_string()))
-                        } else if let Some(reasoning) = delta["reasoning_content"].as_str() {
+                        } else if let Some(reasoning) = delta["reasoning_content"]
+                            .as_str()
+                            .or_else(|| delta["reasoning"].as_str())
+                        {
                             // Bọc reasoning content trong tag <think> để frontend dễ parse
                             Some(Ok(format!("<think>{}</think>", reasoning)))
                         } else {
@@ -105,7 +88,7 @@ impl LlmProvider for OpenAiProvider {
                         None
                     }
                 }
-                Err(e) => Some(Err(format!("Stream error: {}", e))),
+                Err(e) => Some(Err(format!("Stream error: {}", super::error_chain(&e)))),
             }
         });
 

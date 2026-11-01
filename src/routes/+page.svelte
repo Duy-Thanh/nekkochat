@@ -3,15 +3,17 @@
   import { listen } from "@tauri-apps/api/event";
   import { open } from "@tauri-apps/plugin-dialog";
   import { onMount } from "svelte";
+  import { goto } from "$app/navigation";
+  import { settings } from "$lib/settings.svelte";
   import Markdown from '$lib/Markdown.svelte';
   import ThinkingBlock from '$lib/ThinkingBlock.svelte';
   import { SYSTEM_PRESETS, type SystemPreset } from '$lib/presets';
 
-  import { 
-    X, 
-    Menu, 
-    ChevronDown, 
-    Send, 
+  import {
+    X,
+    Menu,
+    Settings as SettingsIcon,
+    Send,
     Plus,
     MessageSquare,
     Trash2,
@@ -19,7 +21,11 @@
     FileText,
     Loader2,
     SlidersHorizontal,
-    Sparkles
+    Sparkles,
+    Square,
+    RotateCcw,
+    Copy,
+    Check
   } from '@lucide/svelte';
 
   type Message = {
@@ -35,30 +41,32 @@
     messages: Message[];
   };
 
-  let provider = $state("openai");
-  let baseUrl = $state("https://integrate.api.nvidia.com/v1");
-  let apiKey = $state("");
-  let selectedModel = $state("nvidia/nemotron-3-ultra-550b-a55b");
+  type DocumentInfo = { fileName: string; chunks: number };
+
   let inputPrompt = $state("");
-  
+
   // Sessions State
   let sessions = $state<ChatSession[]>([]);
   let currentSessionId = $state<string>("");
+  // Mỗi session stream độc lập nên có thể chuyển session trong lúc đang trả lời
+  let generatingIds = $state<string[]>([]);
+  let loadError = $state("");
 
   // Presets UI State
   let isPresetModalOpen = $state(false);
 
-  // RAG Indexing State
+  // RAG State
   let isIndexing = $state(false);
-  let indexedFiles = $state<string[]>([]);
+  let documents = $state<DocumentInfo[]>([]);
   let ragStatusMsg = $state("");
+  let ragStatusTimer: ReturnType<typeof setTimeout> | undefined;
 
-  let isGenerating = $state(false);
   let isSidebarOpen = $state(false);
+  let copiedIndex = $state<number | null>(null);
 
   let chatContainer: HTMLDivElement;
+  let inputEl: HTMLTextAreaElement;
 
-  // Lấy Session hiện tại
   let currentSession = $derived.by(() => {
     return sessions.find(s => s.id === currentSessionId);
   });
@@ -67,21 +75,23 @@
     return currentSession ? currentSession.messages : [];
   });
 
-  $effect(() => {
-    if (provider === "ollama") {
-      baseUrl = "http://localhost:11434";
-    } else if (provider === "openai") {
-      baseUrl = "https://api.openai.com/v1";
-    } else if (provider === "anthropic") {
-      baseUrl = "https://api.anthropic.com/v1";
-    }
-  });
+  let isGenerating = $derived(generatingIds.includes(currentSessionId));
+
+  let lastMessage = $derived(currentMessages[currentMessages.length - 1]);
 
   function scrollToBottom() {
     setTimeout(() => {
       if (chatContainer) chatContainer.scrollTop = chatContainer.scrollHeight;
     }, 50);
   }
+
+  function showRagStatus(msg: string, autoClear = true) {
+    clearTimeout(ragStatusTimer);
+    ragStatusMsg = msg;
+    if (autoClear) ragStatusTimer = setTimeout(() => ragStatusMsg = "", 4000);
+  }
+
+  // ---- Persistence ----
 
   async function loadSessions() {
     try {
@@ -92,21 +102,31 @@
           systemPrompt: s.systemPrompt || SYSTEM_PRESETS[0].prompt
         }));
         currentSessionId = sessions[0].id;
-      } else {
-        createNewSession();
+        return;
       }
     } catch (err) {
-      console.error("Lỗi load sessions từ Rust:", err);
-      createNewSession();
+      console.error("Failed to load sessions:", err);
+      loadError = String(err);
     }
+    createNewSession();
   }
 
   async function saveSessions() {
     try {
       await invoke("save_sessions", { sessions: $state.snapshot(sessions) });
     } catch (err) {
-      console.error("Lỗi save sessions sang Rust:", err);
+      console.error("Failed to save sessions:", err);
     }
+  }
+
+  // Ghi đĩa theo nhịp thay vì mỗi token
+  let saveTimer: ReturnType<typeof setTimeout> | undefined;
+  function queueSaveSessions() {
+    if (saveTimer) return;
+    saveTimer = setTimeout(() => {
+      saveTimer = undefined;
+      saveSessions();
+    }, 1000);
   }
 
   function createNewSession(presetPrompt?: string) {
@@ -119,6 +139,7 @@
     };
     sessions = [newSession, ...sessions];
     currentSessionId = newSession.id;
+    isSidebarOpen = false;
     saveSessions();
   }
 
@@ -132,6 +153,7 @@
 
   function deleteSession(id: string, e: Event) {
     e.stopPropagation();
+    if (generatingIds.includes(id)) stopGeneration(id);
     sessions = sessions.filter(s => s.id !== id);
     if (sessions.length === 0) {
       createNewSession();
@@ -156,131 +178,198 @@
     return { thinking, answer };
   }
 
-  async function handlePickAndIndexFile() {
+  // ---- RAG ----
+
+  async function refreshDocuments() {
     try {
-      const selected = await open({
-        multiple: false,
-        filters: [{
-          name: 'Documents & Code',
-          extensions: ['txt', 'md', 'rs', 'py', 'c', 'cpp', 'js', 'ts', 'json']
-        }]
-      });
-
-      if (selected && typeof selected === 'string') {
-        isIndexing = true;
-        ragStatusMsg = "Đang tạo Vector Embeddings...";
-        
-        const res = await invoke<string>("index_document_command", {
-          baseUrl,
-          apiKey,
-          filePath: selected
-        });
-
-        const fileName = selected.split(/[/\\]/).pop() || selected;
-        if (!indexedFiles.includes(fileName)) {
-          indexedFiles = [...indexedFiles, fileName];
-        }
-
-        ragStatusMsg = res;
-        setTimeout(() => ragStatusMsg = "", 4000);
-      }
+      documents = await invoke<DocumentInfo[]>("list_documents");
     } catch (err) {
-      console.error("Indexing error:", err);
-      ragStatusMsg = `[Lỗi Index File]: ${err}`;
-      setTimeout(() => ragStatusMsg = "", 4000);
-    } finally {
-      isIndexing = false;
+      console.error("Failed to list documents:", err);
     }
   }
 
-  onMount(() => {
-    loadSessions();
+  async function handlePickAndIndexFile() {
+    let selected: string | string[] | null;
+    try {
+      selected = await open({
+        multiple: true,
+        filters: [{
+          name: 'Documents & Code',
+          extensions: ['txt', 'md', 'rs', 'py', 'c', 'cpp', 'h', 'js', 'ts', 'json', 'svelte', 'html', 'css', 'toml', 'yaml', 'yml', 'csv', 'log', 'go', 'java', 'kt', 'sh']
+        }]
+      });
+    } catch (err) {
+      showRagStatus(`[File picker error]: ${err}`);
+      return;
+    }
+    if (!selected) return;
+    const paths = Array.isArray(selected) ? selected : [selected];
 
-    let unlistenChunk: (() => void) | undefined;
-    let unlistenDone: (() => void) | undefined;
+    isIndexing = true;
+    try {
+      for (const filePath of paths) {
+        const name = filePath.split(/[/\\]/).pop() || filePath;
+        showRagStatus(`Creating embeddings: ${name}...`, false);
+        showRagStatus(await invoke<string>("index_document_command", {
+          provider: settings.provider,
+          baseUrl: settings.baseUrl,
+          apiKey: settings.apiKey,
+          embedding: settings.embedding,
+          filePath
+        }));
+      }
+    } catch (err) {
+      console.error("Indexing error:", err);
+      showRagStatus(`[Indexing error]: ${err}`);
+    } finally {
+      isIndexing = false;
+      await refreshDocuments();
+    }
+  }
+
+  async function removeDocument(fileName: string) {
+    try {
+      await invoke("delete_document", { fileName });
+    } catch (err) {
+      showRagStatus(`[Delete document error]: ${err}`);
+    }
+    await refreshDocuments();
+  }
+
+  // ---- Chat ----
+
+  onMount(() => {
+    const unlisteners: Array<() => void> = [];
+    let disposed = false;
 
     (async () => {
-      unlistenChunk = await listen<string>("chat-chunk", (event) => {
-        const sessionIndex = sessions.findIndex(s => s.id === currentSessionId);
-        if (sessionIndex !== -1) {
-          const msgs = sessions[sessionIndex].messages;
-          if (msgs.length > 0 && msgs[msgs.length - 1].role === "assistant") {
-            msgs[msgs.length - 1].content += event.payload;
-            saveSessions();
-          }
-        }
-        scrollToBottom();
-      });
+      await settings.load();
+      await loadSessions();
+      await refreshDocuments();
 
-      unlistenDone = await listen("chat-done", () => {
-        isGenerating = false;
-        saveSessions();
-      });
+      const subs = await Promise.all([
+        listen<{ sessionId: string; text: string }>("chat-chunk", (event) => {
+          const sess = sessions.find(s => s.id === event.payload.sessionId);
+          const last = sess?.messages[sess.messages.length - 1];
+          if (sess && last?.role === "assistant") {
+            last.content += event.payload.text;
+            queueSaveSessions();
+            if (sess.id === currentSessionId) scrollToBottom();
+          }
+        }),
+        listen<string>("chat-done", (event) => {
+          const id = event.payload;
+          generatingIds = generatingIds.filter(x => x !== id);
+          const sess = sessions.find(s => s.id === id);
+          const last = sess?.messages[sess.messages.length - 1];
+          // Dừng trước khi có token nào: bỏ bubble rỗng
+          if (sess && last?.role === "assistant" && !last.content) sess.messages.pop();
+          saveSessions();
+        }),
+        listen<string>("rag-progress", (event) => {
+          if (isIndexing) showRagStatus(`Creating embeddings ${event.payload}...`, false);
+        })
+      ]);
+
+      if (disposed) subs.forEach(u => u());
+      else unlisteners.push(...subs);
     })();
 
     return () => {
-      if (unlistenChunk) unlistenChunk();
-      if (unlistenDone) unlistenDone();
+      disposed = true;
+      unlisteners.forEach(u => u());
     };
   });
 
   async function sendMessage() {
-    if (!inputPrompt.trim() || isGenerating) return;
+    const userText = inputPrompt.trim();
+    if (!userText || isGenerating) return;
 
-    const userText = inputPrompt;
+    const sess = currentSession;
+    if (!sess) return;
+
     inputPrompt = "";
+    if (inputEl) inputEl.style.height = "auto";
 
-    const sessionIndex = sessions.findIndex(s => s.id === currentSessionId);
-    if (sessionIndex === -1) return;
-
-    const currentSess = sessions[sessionIndex];
-
-    if (currentSess.messages.length === 0) {
-      currentSess.title = userText.slice(0, 30) + (userText.length > 30 ? "..." : "");
+    if (sess.messages.length === 0) {
+      sess.title = userText.slice(0, 30) + (userText.length > 30 ? "..." : "");
     }
+    sess.messages.push({ role: "user", content: userText });
+    await generate(sess);
+  }
 
-    currentSess.messages.push({ role: "user", content: userText });
-    currentSess.messages.push({ role: "assistant", content: "" });
-    currentSess.updatedAt = Date.now();
+  async function generate(sess: ChatSession) {
+    sess.messages.push({ role: "assistant", content: "" });
+    sess.updatedAt = Date.now();
     saveSessions();
 
-    isGenerating = true;
+    generatingIds = [...generatingIds, sess.id];
     scrollToBottom();
 
-    // 1. Clean history
-    const cleanContextMessages: Message[] = currentSess.messages.slice(0, -1).map(m => {
-      if (m.role === "assistant") {
-        const parsed = parseThinking(m.content);
-        return { role: m.role, content: parsed.answer };
-      }
-      return m;
-    });
+    // Bỏ phần <think> khỏi history và các tin nhắn assistant rỗng
+    const context: Message[] = sess.messages
+      .slice(0, -1)
+      .map(m => m.role === "assistant" ? { role: m.role, content: parseThinking(m.content).answer } : m)
+      .filter(m => m.role !== "assistant" || m.content);
 
-    // 2. Chèn System Prompt của Session vào vị trí đầu tiên
-    if (currentSess.systemPrompt) {
-      cleanContextMessages.unshift({
-        role: "system",
-        content: currentSess.systemPrompt
-      });
+    if (sess.systemPrompt) {
+      context.unshift({ role: "system", content: sess.systemPrompt });
     }
 
     try {
       await invoke("stream_chat_command", {
         payload: {
-          provider,
-          baseUrl,
-          apiKey,
-          model: selectedModel,
-          messages: cleanContextMessages
+          sessionId: sess.id,
+          provider: settings.provider,
+          baseUrl: settings.baseUrl,
+          apiKey: settings.apiKey,
+          model: settings.model,
+          messages: context,
+          embedding: settings.embedding
         }
       });
     } catch (err) {
       console.error(err);
-      const msgs = currentSess.messages;
-      msgs[msgs.length - 1].content = `[ERROR]: ${err}`;
-      isGenerating = false;
+      sess.messages[sess.messages.length - 1].content = `[ERROR]: ${err}`;
+      generatingIds = generatingIds.filter(x => x !== sess.id);
       saveSessions();
     }
+  }
+
+  function stopGeneration(id = currentSessionId) {
+    invoke("stop_chat_command", { sessionId: id }).catch(console.error);
+  }
+
+  async function regenerate() {
+    const sess = currentSession;
+    if (!sess || isGenerating) return;
+    if (sess.messages[sess.messages.length - 1]?.role === "assistant") sess.messages.pop();
+    if (sess.messages.length === 0) return;
+    await generate(sess);
+  }
+
+  async function copyMessage(index: number) {
+    const msg = currentMessages[index];
+    try {
+      await navigator.clipboard.writeText(parseThinking(msg.content).answer || msg.content);
+      copiedIndex = index;
+      setTimeout(() => { if (copiedIndex === index) copiedIndex = null; }, 1500);
+    } catch (err) {
+      console.error("Copy failed:", err);
+    }
+  }
+
+  function onInputKeydown(e: KeyboardEvent) {
+    // isComposing: không gửi khi đang gõ dở Telex/VNI/IME
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+      e.preventDefault();
+      sendMessage();
+    }
+  }
+
+  function autoResize() {
+    inputEl.style.height = "auto";
+    inputEl.style.height = Math.min(inputEl.scrollHeight, 200) + "px";
   }
 </script>
 
@@ -301,7 +390,7 @@
         <div class="flex items-center justify-between border-b border-zinc-800 pb-3">
           <div class="flex items-center gap-2">
             <Sparkles class="w-4 h-4 text-emerald-400" />
-            <h3 class="font-bold text-sm text-zinc-100">Chọn Vai Trò (System Prompt Preset)</h3>
+            <h3 class="font-bold text-sm text-zinc-100">Choose a Role (System Prompt Preset)</h3>
           </div>
           <button onclick={() => isPresetModalOpen = false} class="text-zinc-400 hover:text-white p-1">
             <X class="w-4 h-4" />
@@ -352,12 +441,12 @@
       class="flex items-center justify-center gap-2 w-full py-2.5 px-4 bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-semibold rounded-xl text-xs transition-all shadow-md shadow-emerald-950/20 cursor-pointer"
     >
       <Plus class="w-4 h-4" />
-      <span>Cuộc trò chuyện mới</span>
+      <span>New chat</span>
     </button>
 
     <!-- Sessions List (History) -->
-    <div class="flex flex-col gap-1 overflow-y-auto max-h-40 border-b border-zinc-800/60 pb-3 pr-1">
-      <span class="text-[10px] font-semibold text-zinc-500 tracking-wider uppercase px-1 mb-1">Lịch sử Chat</span>
+    <div class="flex flex-col gap-1 overflow-y-auto max-h-56 min-h-16 border-b border-zinc-800/60 pb-3 pr-1">
+      <span class="text-[10px] font-semibold text-zinc-500 tracking-wider uppercase px-1 mb-1">Chat History</span>
       {#each sessions as s (s.id)}
         <div 
           onclick={() => currentSessionId = s.id}
@@ -374,7 +463,7 @@
           <button 
             onclick={(e) => deleteSession(s.id, e)}
             class="opacity-0 group-hover:opacity-100 hover:text-red-400 p-1 transition-opacity"
-            title="Xóa conversation"
+            title="Delete conversation"
           >
             <Trash2 class="w-3.5 h-3.5" />
           </button>
@@ -382,59 +471,19 @@
       {/each}
     </div>
 
-    <!-- Provider Config Controls -->
-    <div class="flex flex-col gap-3 overflow-y-auto flex-1 pr-1 pt-1">
-      <div class="flex flex-col gap-1">
-        <label for="provider-select" class="text-[10px] font-semibold text-zinc-400 tracking-wider uppercase">Provider</label>
-        <div class="relative">
-          <select 
-            id="provider-select" 
-            bind:value={provider} 
-            class="w-full bg-[#1a1d24] border border-zinc-800/80 rounded-xl px-3 py-2 text-xs font-medium text-zinc-100 appearance-none focus:outline-none focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/20 transition-all cursor-pointer"
-          >
-            <option value="ollama" class="bg-[#1a1d24] text-zinc-100">Ollama (Local)</option>
-            <option value="openai" class="bg-[#1a1d24] text-zinc-100">OpenAI Compatible</option>
-            <option value="anthropic" class="bg-[#1a1d24] text-zinc-100">Anthropic Compatible</option>
-          </select>
-          <div class="pointer-events-none absolute inset-y-0 right-0 flex items-center px-3 text-zinc-400 text-xs">
-            <ChevronDown class="w-3.5 h-3.5" />
-          </div>
-        </div>
-      </div>
+    <div class="flex-1"></div>
 
-      <div class="flex flex-col gap-1">
-        <label for="base-url-input" class="text-[10px] font-semibold text-zinc-400 tracking-wider uppercase">Base URL</label>
-        <input 
-          id="base-url-input" 
-          type="text" 
-          bind:value={baseUrl} 
-          class="bg-[#1a1d24] border border-zinc-800/80 rounded-xl px-3 py-1.5 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/20 transition-all" 
-        />
+    <!-- Settings entry -->
+    <button
+      onclick={() => goto("/settings")}
+      class="flex items-center gap-3 w-full px-3 py-2.5 rounded-xl bg-[#1a1d24] hover:bg-zinc-800/70 border border-zinc-800/80 text-left transition-colors cursor-pointer"
+    >
+      <SettingsIcon class="w-4 h-4 text-emerald-400 shrink-0" />
+      <div class="min-w-0 flex-1">
+        <div class="text-xs font-semibold text-zinc-200">Settings</div>
+        <div class="text-[10px] text-zinc-500 font-mono truncate">{settings.provider} · {settings.model}</div>
       </div>
-
-      {#if provider !== 'ollama'}
-        <div class="flex flex-col gap-1">
-          <label for="api-key-input" class="text-[10px] font-semibold text-zinc-400 tracking-wider uppercase">API Key</label>
-          <input 
-            id="api-key-input" 
-            type="password" 
-            bind:value={apiKey} 
-            placeholder="sk-..." 
-            class="bg-[#1a1d24] border border-zinc-800/80 rounded-xl px-3 py-1.5 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/20 transition-all" 
-          />
-        </div>
-      {/if}
-
-      <div class="flex flex-col gap-1">
-        <label for="model-name-input" class="text-[10px] font-semibold text-zinc-400 tracking-wider uppercase">Model Name</label>
-        <input 
-          id="model-name-input" 
-          type="text" 
-          bind:value={selectedModel} 
-          class="bg-[#1a1d24] border border-zinc-800/80 rounded-xl px-3 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/20 transition-all" 
-        />
-      </div>
-    </div>
+    </button>
 
     <div class="pt-2 border-t border-zinc-800/40 text-[10px] text-zinc-600 text-center font-mono">
       &copy; 2026 Nekkochan
@@ -454,7 +503,7 @@
         </button>
         <div class="flex items-center gap-2">
           <span class="w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]"></span>
-          <span class="font-semibold text-xs text-zinc-200 tracking-wide">{selectedModel}</span>
+          <span class="font-semibold text-xs text-zinc-200 tracking-wide">{settings.model}</span>
         </div>
       </div>
 
@@ -463,33 +512,48 @@
         <button 
           onclick={() => isPresetModalOpen = true}
           class="flex items-center gap-1.5 px-3 py-1 rounded-xl bg-zinc-800/60 hover:bg-zinc-800 text-zinc-300 border border-zinc-700/50 text-xs font-medium transition-all cursor-pointer"
-          title="Chọn vai trò System Prompt"
+          title="Choose system prompt role"
         >
           <SlidersHorizontal class="w-3.5 h-3.5 text-emerald-400" />
           <span>Role Persona</span>
         </button>
 
         <span class="text-[10px] font-semibold px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono uppercase">
-          {provider}
+          {settings.provider}
         </span>
       </div>
     </header>
 
     <!-- Chat Messages -->
     <div bind:this={chatContainer} class="flex-1 overflow-y-auto p-4 md:p-8 space-y-6">
+      {#if loadError}
+        <div class="max-w-xl mx-auto text-xs text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-xl px-4 py-3">
+          Couldn't read previous chat history: {loadError}
+        </div>
+      {/if}
+
+      {#if settings.loaded && !settings.isConfigured}
+        <div class="max-w-xl mx-auto flex items-center justify-between gap-3 text-xs text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-xl px-4 py-3">
+          <span>No API key set for provider "{settings.provider}".</span>
+          <button onclick={() => goto("/settings")} class="font-semibold underline underline-offset-2 hover:text-amber-200 cursor-pointer shrink-0">
+            Open Settings
+          </button>
+        </div>
+      {/if}
+
       {#if currentMessages.length === 0}
         <div class="h-full flex flex-col items-center justify-center text-zinc-500 px-4 text-center">
           <div class="w-12 h-12 mb-4 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400 text-xl">
             ✦
           </div>
           <p class="text-sm font-semibold text-zinc-300">NekkoChat Ready</p>
-          <p class="text-xs text-zinc-500 max-w-xs mt-1 leading-relaxed">Chọn Role Persona ở góc phải hoặc ném file code vào để RAG phân tích!</p>
+          <p class="text-xs text-zinc-500 max-w-xs mt-1 leading-relaxed">Pick a Role Persona in the top right, or attach files for RAG analysis.</p>
         </div>
       {/if}
 
       {#each currentMessages as msg, index}
         <div class="flex flex-col {msg.role === 'user' ? 'items-end' : 'items-start'}">
-          <span class="text-[10px] font-medium text-zinc-500 mb-1.5 px-1">{msg.role === 'user' ? 'You' : selectedModel}</span>
+          <span class="text-[10px] font-medium text-zinc-500 mb-1.5 px-1">{msg.role === 'user' ? 'You' : settings.model}</span>
           <div 
             class="max-w-[85%] md:max-w-[70%] rounded-2xl px-4 py-3 text-xs md:text-sm leading-relaxed whitespace-pre-wrap
             {msg.role === 'user' 
@@ -519,14 +583,51 @@
               {/if}
             {/if}
           </div>
+
+          {#if msg.role === 'assistant' && msg.content && !(isGenerating && index === currentMessages.length - 1)}
+            <div class="flex items-center gap-1 mt-1.5 px-1">
+              <button
+                onclick={() => copyMessage(index)}
+                title="Copy"
+                class="p-1.5 rounded-lg text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800/60 transition-colors cursor-pointer"
+              >
+                {#if copiedIndex === index}
+                  <Check class="w-3.5 h-3.5 text-emerald-400" />
+                {:else}
+                  <Copy class="w-3.5 h-3.5" />
+                {/if}
+              </button>
+              {#if index === currentMessages.length - 1}
+                <button
+                  onclick={regenerate}
+                  title="Regenerate response"
+                  class="p-1.5 rounded-lg text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800/60 transition-colors cursor-pointer"
+                >
+                  <RotateCcw class="w-3.5 h-3.5" />
+                </button>
+              {/if}
+            </div>
+          {/if}
         </div>
       {/each}
+
+      {#if lastMessage?.role === 'user' && !isGenerating}
+        <div class="flex justify-start">
+          <button
+            onclick={regenerate}
+            class="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs text-zinc-300 bg-zinc-800/60 hover:bg-zinc-800 border border-zinc-700/50 cursor-pointer"
+          >
+            <RotateCcw class="w-3.5 h-3.5 text-emerald-400" />
+            Retry
+          </button>
+        </div>
+      {/if}
     </div>
 
     <!-- Floating Input Box & RAG File Indexer -->
     <div class="p-4 md:p-6 bg-gradient-to-t from-[#0e0f12] via-[#0e0f12]/90 to-transparent shrink-0">
       <div class="max-w-3xl mx-auto flex flex-col gap-2">
-        {#if indexedFiles.length > 0 || ragStatusMsg}
+        {#if documents.length > 0 || ragStatusMsg}
           <div class="flex items-center gap-2 overflow-x-auto py-1 px-1 text-xs">
             {#if ragStatusMsg}
               <span class="text-[11px] text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 px-2.5 py-1 rounded-lg flex items-center gap-1.5 font-mono">
@@ -537,10 +638,20 @@
               </span>
             {/if}
 
-            {#each indexedFiles as file}
-              <span class="text-[11px] text-zinc-300 bg-zinc-800/80 border border-zinc-700/50 px-2.5 py-0.5 rounded-lg flex items-center gap-1.5 font-mono">
+            {#each documents as doc (doc.fileName)}
+              <span
+                class="text-[11px] text-zinc-300 bg-zinc-800/80 border border-zinc-700/50 pl-2.5 pr-1 py-0.5 rounded-lg flex items-center gap-1.5 font-mono shrink-0"
+                title="{doc.chunks} chunks"
+              >
                 <FileText class="w-3 h-3 text-emerald-400" />
-                <span>{file}</span>
+                <span>{doc.fileName}</span>
+                <button
+                  onclick={() => removeDocument(doc.fileName)}
+                  title="Remove from RAG"
+                  class="p-0.5 rounded hover:text-red-400 hover:bg-zinc-700/60 cursor-pointer"
+                >
+                  <X class="w-3 h-3" />
+                </button>
               </span>
             {/each}
           </div>
@@ -548,13 +659,13 @@
 
         <form 
           onsubmit={(e) => { e.preventDefault(); sendMessage(); }} 
-          class="relative flex items-center bg-[#181b22] border border-zinc-800/80 rounded-2xl shadow-xl shadow-black/40 focus-within:border-emerald-500/50 focus-within:ring-1 focus-within:ring-emerald-500/20 transition-all p-1.5 gap-2"
+          class="relative flex items-end bg-[#181b22] border border-zinc-800/80 rounded-2xl shadow-xl shadow-black/40 focus-within:border-emerald-500/50 focus-within:ring-1 focus-within:ring-emerald-500/20 transition-all p-1.5 gap-2"
         >
           <button
             type="button"
             onclick={handlePickAndIndexFile}
-            disabled={isIndexing || isGenerating}
-            title="Đính kèm file tài liệu / source code cho RAG Vector Search"
+            disabled={isIndexing}
+            title="Attach documents / source files for RAG vector search"
             class="p-2.5 text-zinc-400 hover:text-emerald-400 hover:bg-zinc-800/60 rounded-xl transition-all shrink-0 disabled:opacity-50 cursor-pointer"
           >
             {#if isIndexing}
@@ -564,21 +675,34 @@
             {/if}
           </button>
 
-          <input
-            type="text"
+          <textarea
+            bind:this={inputEl}
             bind:value={inputPrompt}
-            disabled={isGenerating}
-            placeholder={isGenerating ? "AI đang trả lời..." : "Hỏi bất cứ điều gì hoặc nhờ phân tích tài liệu..."}
-            class="w-full bg-transparent px-2 py-2.5 text-xs md:text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none disabled:opacity-50"
-          />
+            oninput={autoResize}
+            onkeydown={onInputKeydown}
+            rows="1"
+            placeholder={isGenerating ? "AI is responding..." : "Ask anything or have it analyze your documents... (Shift+Enter for new line)"}
+            class="w-full bg-transparent px-2 py-2.5 text-xs md:text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none resize-none max-h-[200px]"
+          ></textarea>
 
-          <button
-            type="submit"
-            disabled={isGenerating || !inputPrompt.trim()}
-            class="bg-emerald-500 hover:bg-emerald-400 disabled:bg-zinc-800/50 disabled:text-zinc-600 text-zinc-950 font-bold px-4 py-2.5 rounded-xl text-xs transition-all shrink-0 cursor-pointer disabled:cursor-not-allowed flex items-center justify-center"
-          >
-            <Send class="w-4 h-4" />
-          </button>
+          {#if isGenerating}
+            <button
+              type="button"
+              onclick={() => stopGeneration()}
+              title="Stop"
+              class="bg-red-500/90 hover:bg-red-400 text-zinc-950 font-bold px-4 py-2.5 rounded-xl text-xs transition-all shrink-0 cursor-pointer flex items-center justify-center"
+            >
+              <Square class="w-4 h-4 fill-current" />
+            </button>
+          {:else}
+            <button
+              type="submit"
+              disabled={!inputPrompt.trim()}
+              class="bg-emerald-500 hover:bg-emerald-400 disabled:bg-zinc-800/50 disabled:text-zinc-600 text-zinc-950 font-bold px-4 py-2.5 rounded-xl text-xs transition-all shrink-0 cursor-pointer disabled:cursor-not-allowed flex items-center justify-center"
+            >
+              <Send class="w-4 h-4" />
+            </button>
+          {/if}
         </form>
       </div>
     </div>

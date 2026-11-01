@@ -13,7 +13,7 @@
     >
       <div class="flex items-center gap-2 font-medium">
         <Brain class="w-3.5 h-3.5 text-emerald-400 {isGenerating ? 'animate-pulse' : ''}" />
-        <span>{isGenerating ? 'AI đang suy nghĩ...' : 'Quá trình suy luận'}</span>
+        <span>{isGenerating ? 'AI is thinking...' : 'Reasoning'}</span>
       </div>
       <ChevronRight class="w-3.5 h-3.5 transform transition-transform duration-200 {isOpen ? 'rotate-90' : ''}" />
     </button>

@@ -13,9 +13,9 @@ pub struct AnthropicProvider {
 impl AnthropicProvider {
     pub fn new() -> Self {
         let client = Client::builder()
-                    // setup timeout
-                    .connect_timeout(Duration::from_secs(30))
-                    .timeout(Duration::from_secs(60))
+                    // Không đặt timeout tổng: stream dài sẽ bị cắt. Timeout theo từng chunk nằm ở lib.rs
+                    .connect_timeout(Duration::from_secs(15))
+            .tcp_keepalive(std::time::Duration::from_secs(30))
                     .build()
                     .unwrap_or_else(|_| Client::new());
 
@@ -84,6 +84,12 @@ impl LlmProvider for AnthropicProvider {
             match event {
                 Ok(ev) => {
                     if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&ev.data) {
+                        if parsed["type"] == "error" {
+                            return Some(Err(parsed["error"]["message"]
+                                .as_str()
+                                .unwrap_or("unknown stream error")
+                                .to_string()));
+                        }
                         if parsed["type"] == "content_block_delta" {
                             if let Some(text) = parsed["delta"]["text"].as_str() {
                                 return Some(Ok(text.to_string()));
@@ -92,7 +98,7 @@ impl LlmProvider for AnthropicProvider {
                     }
                     None
                 }
-                Err(e) => Some(Err(format!("Stream error: {}", e))),
+                Err(e) => Some(Err(format!("Stream error: {}", super::error_chain(&e)))),
             }
         });
 
