@@ -39,3 +39,155 @@
     background-color: #52525b;
   }
 }
+
+/*
+ * App feel. A page lets you select everything, drag the page around, zoom and long-press for a
+ * browser menu; an app does none of that for its controls. Message text, code and form fields
+ * stay selectable.
+ */
+html,
+body {
+  height: 100%;
+  margin: 0;
+  background: #0e0f12;
+  /* no rubber-band / pull-to-refresh / back-swipe chaining at the page edge */
+  overscroll-behavior: none;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  /* tapping never waits for a possible double-tap, and never zooms */
+  touch-action: manipulation;
+}
+
+.selectable,
+.selectable *,
+input,
+textarea,
+pre,
+code {
+  user-select: text;
+  -webkit-user-select: text;
+  -webkit-touch-callout: default;
+}
+
+img,
+svg {
+  -webkit-user-drag: none;
+  user-drag: none;
+}
+
+/* Scroll areas stay inside themselves instead of dragging the whole page */
+.overflow-y-auto,
+.overflow-auto,
+.overflow-x-auto {
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Touch screens: no scrollbars (the finger is the scrollbar), real touch targets, press feedback */
+@media (pointer: coarse) {
+  * {
+    scrollbar-width: none;
+  }
+
+  /* 16px+ stops mobile browsers zooming into a focused field, and is the size people expect */
+  input,
+  textarea,
+  select {
+    font-size: 16px !important;
+  }
+
+  button,
+  [role="button"],
+  select {
+    min-height: 40px;
+    min-width: 40px;
+  }
+
+  button,
+  [role="button"],
+  a {
+    transition: transform 90ms ease-out, opacity 90ms ease-out, background-color 120ms ease-out;
+  }
+
+  button:active:not(:disabled),
+  [role="button"]:active,
+  a:active {
+    transform: scale(0.96);
+    opacity: 0.85;
+  }
+}
+
+/* Smooth page changes (Settings <-> Chat) via the View Transitions API */
+@keyframes page-out {
+  to {
+    opacity: 0;
+    transform: translateX(-12px);
+  }
+}
+
+@keyframes page-in {
+  from {
+    opacity: 0;
+    transform: translateX(16px);
+  }
+}
+
+::view-transition-old(root) {
+  animation: 140ms ease-in both page-out;
+}
+
+::view-transition-new(root) {
+  animation: 200ms ease-out both page-in;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-old(root),
+  ::view-transition-new(root) {
+    animation: none;
+  }
+
+  button:active:not(:disabled) {
+    transform: none;
+  }
+}
+
+/* Bottom sheet slides up; new chat messages ease in */
+@keyframes sheet-up {
+  from {
+    transform: translateY(100%);
+  }
+}
+
+@keyframes msg-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+@media (max-width: 767px) {
+  .sheet {
+    animation: sheet-up 280ms cubic-bezier(0.32, 0.72, 0, 1) both;
+    /* keep the sheet's content clear of the gesture/navigation bar */
+    padding-bottom: max(1.25rem, env(safe-area-inset-bottom));
+  }
+}
+
+.msg-in {
+  animation: msg-in 180ms ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sheet,
+  .msg-in {
+    animation: none;
+  }
+}

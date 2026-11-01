@@ -1,5 +1,6 @@
 <script lang="ts">
   import { goto } from "$app/navigation";
+  import { navigateBack } from "$lib/back";
   import { invoke } from "@tauri-apps/api/core";
   import { onMount } from "svelte";
   import { settings, PROVIDERS } from "$lib/settings.svelte";
@@ -231,16 +232,17 @@
 {/snippet}
 
 <div class="h-dvh w-screen overflow-y-auto bg-[#0e0f12] text-zinc-100 font-sans antialiased">
-  <header class="sticky top-0 z-10 h-14 border-b border-zinc-800/40 px-5 flex items-center justify-between bg-[#13151a]/80 backdrop-blur-md">
-    <div class="flex items-center gap-3">
+  <header class="sticky top-0 z-10 h-14 md:border-b border-zinc-800/40 px-2 md:px-5 flex items-center justify-between bg-[#0e0f12]/85 md:bg-[#13151a]/80 backdrop-blur-md">
+    <div class="flex items-center gap-1 md:gap-3">
       <button
-        onclick={() => goto("/")}
-        class="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-zinc-800/60 hover:bg-zinc-800 text-zinc-300 border border-zinc-700/50 text-xs font-medium transition-all cursor-pointer"
+        onclick={navigateBack}
+        aria-label="Back to chat"
+        class="flex items-center gap-1.5 max-md:p-2.5 max-md:rounded-full md:px-3 md:py-1.5 md:rounded-xl bg-transparent md:bg-zinc-800/60 md:hover:bg-zinc-800 text-zinc-300 md:border border-zinc-700/50 text-xs font-medium transition-all cursor-pointer"
       >
-        <ArrowLeft class="w-3.5 h-3.5" />
-        <span>Back to chat</span>
+        <ArrowLeft class="w-5 h-5 md:w-3.5 md:h-3.5" />
+        <span class="max-md:hidden">Back to chat</span>
       </button>
-      <h1 class="font-bold text-sm tracking-tight">Settings</h1>
+      <h1 class="font-semibold md:font-bold text-[17px] md:text-sm tracking-tight">Settings</h1>
     </div>
 
     <div class="text-[11px] font-mono flex items-center gap-1.5 min-w-24 justify-end" aria-live="polite">

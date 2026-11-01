@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { fade } from "svelte/transition";
+  import { pushBackHandler } from "$lib/back";
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
@@ -75,6 +77,40 @@
   let ragStatusTimer: ReturnType<typeof setTimeout> | undefined;
 
   let isSidebarOpen = $state(false);
+
+  // While an overlay is open the system Back button closes it (see back.ts)
+  $effect(() => {
+    if (isSidebarOpen) return pushBackHandler(() => (isSidebarOpen = false));
+  });
+  $effect(() => {
+    if (isPresetModalOpen) return pushBackHandler(() => (isPresetModalOpen = false));
+  });
+
+  const STARTER_PROMPTS = [
+    "Explain something simply",
+    "Help me write an email",
+    "Debug this code",
+    "Summarise my documents",
+  ];
+
+  // Edge swipe: drag in from the left edge to open the history drawer, swipe left to close it.
+  // Only on narrow screens, where the sidebar is a drawer.
+  let swipe: { x: number; y: number } | null = null;
+  function onTouchStart(e: TouchEvent) {
+    const t = e.touches[0];
+    swipe = e.touches.length === 1 && t ? { x: t.clientX, y: t.clientY } : null;
+  }
+  function onTouchEnd(e: TouchEvent) {
+    const start = swipe;
+    swipe = null;
+    const t = e.changedTouches[0];
+    if (!start || !t || window.innerWidth >= 768) return;
+    const dx = t.clientX - start.x;
+    const dy = t.clientY - start.y;
+    if (Math.abs(dy) > Math.abs(dx) * 0.6) return; // mostly vertical: a scroll, not a swipe
+    if (!isSidebarOpen && start.x < 28 && dx > 70) isSidebarOpen = true;
+    else if (isSidebarOpen && dx < -70) isSidebarOpen = false;
+  }
   let copiedIndex = $state<number | null>(null);
 
   let chatContainer: HTMLDivElement;
@@ -564,7 +600,9 @@
 
   function onInputKeydown(e: KeyboardEvent) {
     // isComposing: don't send while an IME (Telex/VNI/etc.) composition is in progress
-    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+    // On a touch screen Enter inserts a new line (the send button sends), as in every phone chat app
+    const touch = window.matchMedia("(pointer: coarse)").matches;
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing && !touch) {
       e.preventDefault();
       sendMessage();
     }
@@ -576,13 +614,19 @@
   }
 </script>
 
-<div class="flex h-dvh w-screen overflow-hidden bg-[#0e0f12] text-zinc-100 font-sans antialiased">
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div
+  ontouchstart={onTouchStart}
+  ontouchend={onTouchEnd}
+  class="flex h-dvh w-screen overflow-hidden bg-[#0e0f12] text-zinc-100 font-sans antialiased"
+>
   {#if isSidebarOpen}
     <!-- svelte-ignore a11y_click_events_have_key_events -->
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div 
-      onclick={() => isSidebarOpen = false} 
-      class="fixed inset-0 bg-black/70 z-40 md:hidden backdrop-blur-sm transition-opacity"
+      onclick={() => isSidebarOpen = false}
+      transition:fade={{ duration: 180 }}
+      class="fixed inset-0 bg-black/60 z-40 md:hidden"
     ></div>
   {/if}
 
@@ -590,15 +634,18 @@
   {#if isPresetModalOpen}
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div
-      class="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4 backdrop-blur-sm"
+      class="fixed inset-0 bg-black/70 z-50 flex items-end md:items-center justify-center md:p-4"
       onkeydown={(e) => e.key === "Escape" && closePresetModal()}
+      transition:fade={{ duration: 160 }}
     >
+      <!-- Bottom sheet on phones, centred dialog on larger screens -->
       <div
-        class="bg-[#13151a] border border-zinc-800 rounded-2xl w-full max-w-2xl max-h-[88dvh] p-5 flex flex-col gap-3 shadow-2xl"
+        class="sheet bg-[#13151a] border border-zinc-800 rounded-t-3xl md:rounded-2xl w-full max-w-2xl max-h-[92dvh] md:max-h-[88dvh] px-5 pt-2 md:pt-5 pb-5 flex flex-col gap-3 shadow-2xl"
         role="dialog"
         aria-modal="true"
         aria-labelledby="preset-title"
       >
+        <div class="md:hidden self-center w-10 h-1 rounded-full bg-zinc-700 shrink-0 mb-1"></div>
         <div class="flex items-center justify-between border-b border-zinc-800 pb-3 shrink-0">
           <div class="flex items-center gap-2">
             <Sparkles class="w-4 h-4 text-emerald-400" />
@@ -710,8 +757,8 @@
 
   <!-- Sidebar Config & Sessions List -->
   <aside 
-    class="fixed md:static inset-y-0 left-0 z-40 w-72 bg-[#13151a] border-r border-zinc-800/50 p-4 flex flex-col gap-4 transform transition-transform duration-200 ease-out shrink-0
-    {isSidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}"
+    class="fixed md:static inset-y-0 left-0 z-40 w-[84%] max-w-80 md:w-72 md:max-w-none bg-[#13151a] border-r border-zinc-800/50 p-4 flex flex-col gap-4 transform transition-transform duration-250 ease-[cubic-bezier(0.32,0.72,0,1)] shrink-0 max-md:rounded-r-3xl
+    {isSidebarOpen ? 'translate-x-0 max-md:shadow-2xl max-md:shadow-black/60' : '-translate-x-full md:translate-x-0'}"
   >
     <div class="flex items-center justify-between">
       <div class="flex items-center gap-2">
@@ -790,7 +837,7 @@
                     ondblclick={(e) => startRename(s, e)}
                     title={s.title}
                     aria-current={isActive ? "true" : undefined}
-                    class="flex items-center gap-2 flex-1 min-w-0 px-3 py-2 text-left text-xs cursor-pointer
+                    class="flex items-center gap-2 flex-1 min-w-0 px-3 py-2 max-md:py-3 text-left text-xs max-md:text-sm cursor-pointer
                     {isActive ? 'text-zinc-100 font-medium' : 'text-zinc-400 group-hover:text-zinc-200'}"
                   >
                     <MessageSquare class="w-3.5 h-3.5 text-zinc-500 shrink-0" />
@@ -803,7 +850,7 @@
                   <!-- Always visible on the active/armed item, otherwise on hover or keyboard focus -->
                   <div
                     class="flex items-center pr-1 shrink-0 transition-opacity
-                    {isActive || isConfirming ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 focus-within:opacity-100'}"
+                    {isActive || isConfirming ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 focus-within:opacity-100 pointer-coarse:opacity-100'}"
                   >
                     {#if !isConfirming}
                       <button
@@ -872,45 +919,50 @@
 
   <!-- Main Chat Container -->
   <main class="flex-1 flex flex-col h-full bg-[#0e0f12] min-w-0">
-    <!-- Header -->
-    <header class="h-14 border-b border-zinc-800/40 px-5 flex items-center justify-between bg-[#13151a]/40 backdrop-blur-md shrink-0">
-      <div class="flex items-center gap-3">
-        <button 
-          onclick={() => isSidebarOpen = true} 
-          class="md:hidden text-zinc-400 hover:text-white p-1.5 rounded-lg bg-zinc-800/40"
+    <!-- Header: a compact app bar on phones -->
+    <header class="h-14 md:border-b border-zinc-800/40 px-2 md:px-5 flex items-center justify-between gap-2 bg-[#0e0f12]/85 md:bg-[#13151a]/40 backdrop-blur-md shrink-0 z-10">
+      <div class="flex items-center gap-1 md:gap-3 min-w-0">
+        <button
+          onclick={() => isSidebarOpen = true}
+          aria-label="Open chat history"
+          class="md:hidden text-zinc-300 p-2.5 rounded-full active:bg-zinc-800/70"
         >
           <Menu class="w-5 h-5" />
         </button>
-        <div class="flex items-center gap-2">
-          <span class="w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]"></span>
-          <span class="font-semibold text-xs text-zinc-200 tracking-wide">{settings.model}</span>
+        <div class="min-w-0">
+          <div class="md:hidden text-[15px] font-semibold text-zinc-100 truncate leading-tight">{currentSession?.title || "New chat"}</div>
+          <div class="flex items-center gap-2 min-w-0">
+            <span class="hidden md:block w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]"></span>
+            <span class="font-medium md:font-semibold text-[11px] md:text-xs text-zinc-500 md:text-zinc-200 md:tracking-wide truncate">{settings.model || "no model"}</span>
+          </div>
         </div>
       </div>
 
       <!-- Action Control Header -->
-      <div class="flex items-center gap-2">
-        <button 
+      <div class="flex items-center gap-2 shrink-0">
+        <button
           onclick={openPresetModal}
-          class="flex items-center gap-1.5 px-3 py-1 rounded-xl bg-zinc-800/60 hover:bg-zinc-800 text-zinc-300 border border-zinc-700/50 text-xs font-medium transition-all cursor-pointer max-w-56"
+          class="flex items-center justify-center gap-1.5 max-md:w-10 max-md:h-10 max-md:rounded-full md:px-3 md:py-1 md:rounded-xl bg-zinc-800/60 hover:bg-zinc-800 text-zinc-300 md:border border-zinc-700/50 text-xs font-medium transition-all cursor-pointer md:max-w-56"
           title="Choose the role (system prompt) for this chat"
+          aria-label="Choose a role"
         >
           {#if activePreset}
             <span>{activePreset.icon}</span>
-            <span class="truncate">{activePreset.name}</span>
+            <span class="truncate max-md:hidden">{activePreset.name}</span>
           {:else}
-            <SlidersHorizontal class="w-3.5 h-3.5 text-emerald-400" />
-            <span class="truncate">Custom prompt</span>
+            <SlidersHorizontal class="w-4 h-4 md:w-3.5 md:h-3.5 text-emerald-400" />
+            <span class="truncate max-md:hidden">Custom prompt</span>
           {/if}
         </button>
 
-        <span class="text-[10px] font-semibold px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono uppercase">
+        <span class="max-md:hidden text-[10px] font-semibold px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono uppercase">
           {settings.provider}
         </span>
       </div>
     </header>
 
     <!-- Chat Messages -->
-    <div bind:this={chatContainer} class="flex-1 overflow-y-auto p-4 md:p-8 space-y-6">
+    <div bind:this={chatContainer} class="flex-1 overflow-y-auto px-3 py-4 md:p-8 space-y-5 md:space-y-6">
       {#if persistence !== "ok"}
         <div class="max-w-xl mx-auto flex items-center justify-between gap-3 text-xs text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-xl px-4 py-3">
           <span>{persistenceMessage}</span>
@@ -949,22 +1001,33 @@
 
       {#if currentMessages.length === 0}
         <div class="h-full flex flex-col items-center justify-center text-zinc-500 px-4 text-center">
-          <div class="w-12 h-12 mb-4 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400 text-xl">
+          <div class="w-14 h-14 mb-4 rounded-3xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400 text-2xl">
             ✦
           </div>
-          <p class="text-sm font-semibold text-zinc-300">NekkoChat Ready</p>
-          <p class="text-xs text-zinc-500 max-w-xs mt-1 leading-relaxed">Pick a Role Persona in the top right, or attach files for RAG analysis.</p>
+          <p class="text-lg font-semibold text-zinc-200">How can I help?</p>
+          <p class="text-xs text-zinc-500 max-w-xs mt-1 leading-relaxed">Pick a role at the top, or attach documents to chat with them.</p>
+          <div class="flex flex-wrap justify-center gap-2 mt-6 max-w-sm">
+            {#each STARTER_PROMPTS as starter (starter)}
+              <button
+                onclick={() => { inputPrompt = starter; inputEl?.focus(); autoResize(); }}
+                class="px-3.5 py-2 rounded-full bg-zinc-800/50 border border-zinc-700/50 text-xs text-zinc-300 active:bg-zinc-700/60 cursor-pointer"
+              >
+                {starter}
+              </button>
+            {/each}
+          </div>
         </div>
       {/if}
 
       {#each currentMessages as msg, index}
-        <div class="flex flex-col {msg.role === 'user' ? 'items-end' : 'items-start'}">
-          <span class="text-[10px] font-medium text-zinc-500 mb-1.5 px-1">{msg.role === 'user' ? 'You' : settings.model}</span>
-          <div 
-            class="max-w-[85%] md:max-w-[70%] rounded-2xl px-4 py-3 text-xs md:text-sm leading-relaxed whitespace-pre-wrap
-            {msg.role === 'user' 
-              ? 'bg-emerald-600 text-white rounded-tr-xs shadow-lg shadow-emerald-950/20' 
-              : 'bg-[#181b22] text-zinc-200 border border-zinc-800/80 rounded-tl-xs shadow-sm'}"
+        <div class="msg-in flex flex-col {msg.role === 'user' ? 'items-end' : 'items-start'}">
+          <span class="max-md:hidden text-[10px] font-medium text-zinc-500 mb-1.5 px-1">{msg.role === 'user' ? 'You' : settings.model}</span>
+          <!-- Phones: your messages are bubbles, the answer is plain full-width text (like a chat app) -->
+          <div
+            class="rounded-2xl text-[15px] md:text-sm leading-relaxed whitespace-pre-wrap selectable
+            {msg.role === 'user'
+              ? 'max-w-[82%] md:max-w-[70%] px-4 py-2.5 md:py-3 bg-emerald-600 text-white rounded-br-md md:rounded-br-2xl md:rounded-tr-xs shadow-lg shadow-emerald-950/20'
+              : 'max-w-full md:max-w-[70%] px-1 py-1 md:px-4 md:py-3 text-zinc-200 md:bg-[#181b22] md:border border-zinc-800/80 md:rounded-tl-xs md:shadow-sm'}"
           >
             {#if msg.role === 'assistant' && !msg.content && isGenerating && index === currentMessages.length - 1}
               <span class="inline-flex gap-1 items-center py-1">
@@ -1031,7 +1094,7 @@
     </div>
 
     <!-- Floating Input Box & RAG File Indexer -->
-    <div class="p-4 md:p-6 bg-gradient-to-t from-[#0e0f12] via-[#0e0f12]/90 to-transparent shrink-0">
+    <div class="px-3 pt-2 pb-3 md:p-6 md:bg-gradient-to-t from-[#0e0f12] via-[#0e0f12]/90 to-transparent shrink-0">
       <div class="max-w-3xl mx-auto flex flex-col gap-2">
         {#if ragStatusMsg}
           <div
@@ -1091,14 +1154,14 @@
 
         <form 
           onsubmit={(e) => { e.preventDefault(); sendMessage(); }} 
-          class="relative flex items-end bg-[#181b22] border border-zinc-800/80 rounded-2xl shadow-xl shadow-black/40 focus-within:border-emerald-500/50 focus-within:ring-1 focus-within:ring-emerald-500/20 transition-all p-1.5 gap-2"
+          class="relative flex items-end bg-[#181b22] border border-zinc-800/80 rounded-[26px] md:rounded-2xl shadow-xl shadow-black/40 focus-within:border-emerald-500/50 focus-within:ring-1 focus-within:ring-emerald-500/20 transition-all p-1.5 gap-1.5 md:gap-2"
         >
           <button
             type="button"
             onclick={handlePickAndIndexFile}
             disabled={isIndexing}
             title="Attach documents / source files for RAG vector search"
-            class="p-2.5 text-zinc-400 hover:text-emerald-400 hover:bg-zinc-800/60 rounded-xl transition-all shrink-0 disabled:opacity-50 cursor-pointer"
+            class="p-2.5 max-md:w-10 max-md:h-10 flex items-center justify-center text-zinc-400 hover:text-emerald-400 hover:bg-zinc-800/60 rounded-full md:rounded-xl transition-all shrink-0 disabled:opacity-50 cursor-pointer"
           >
             {#if isIndexing}
               <Loader2 class="w-4 h-4 animate-spin text-emerald-400" />
@@ -1113,7 +1176,7 @@
             oninput={autoResize}
             onkeydown={onInputKeydown}
             rows="1"
-            placeholder={isGenerating ? "AI is responding..." : "Ask anything or have it analyze your documents... (Shift+Enter for new line)"}
+            placeholder={isGenerating ? "AI is responding..." : "Message"}
             class="w-full bg-transparent px-2 py-2.5 text-xs md:text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none resize-none max-h-[200px]"
           ></textarea>
 
@@ -1122,7 +1185,7 @@
               type="button"
               onclick={() => stopGeneration()}
               title="Stop"
-              class="bg-red-500/90 hover:bg-red-400 text-zinc-950 font-bold px-4 py-2.5 rounded-xl text-xs transition-all shrink-0 cursor-pointer flex items-center justify-center"
+              class="bg-red-500/90 hover:bg-red-400 text-zinc-950 font-bold px-4 py-2.5 max-md:w-10 max-md:h-10 max-md:p-0 rounded-full md:rounded-xl text-xs transition-all shrink-0 cursor-pointer flex items-center justify-center"
             >
               <Square class="w-4 h-4 fill-current" />
             </button>
@@ -1130,7 +1193,7 @@
             <button
               type="submit"
               disabled={!inputPrompt.trim()}
-              class="bg-emerald-500 hover:bg-emerald-400 disabled:bg-zinc-800/50 disabled:text-zinc-600 text-zinc-950 font-bold px-4 py-2.5 rounded-xl text-xs transition-all shrink-0 cursor-pointer disabled:cursor-not-allowed flex items-center justify-center"
+              class="bg-emerald-500 hover:bg-emerald-400 disabled:bg-zinc-800/50 disabled:text-zinc-600 text-zinc-950 font-bold px-4 py-2.5 max-md:w-10 max-md:h-10 max-md:p-0 rounded-full md:rounded-xl text-xs transition-all shrink-0 cursor-pointer disabled:cursor-not-allowed flex items-center justify-center"
             >
               <Send class="w-4 h-4" />
             </button>

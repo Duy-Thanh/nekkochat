@@ -3,7 +3,12 @@
   <head>
     <meta charset="utf-8" />
     <link rel="icon" href="%sveltekit.assets%/favicon.png" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- App-like viewport: no pinch/double-tap zoom, draw under cut-outs, keyboard resizes the page -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content"
+    />
+    <meta name="theme-color" content="#0e0f12" />
     <title>NekkoChat</title>
     %sveltekit.head%
   </head>

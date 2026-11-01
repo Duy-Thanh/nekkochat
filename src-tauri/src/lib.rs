@@ -739,6 +739,12 @@ async fn save_sessions(
     write_atomic_bytes(&path, &data_crypto::encrypt(&key, "sessions", &json)?)
 }
 
+/// Quits the app. The Android Back button calls this when there is nothing left to go back to.
+#[tauri::command]
+fn exit_app(app: AppHandle) {
+    app.exit(0);
+}
+
 #[tauri::command]
 fn stop_chat_command(state: State<'_, AppState>, session_id: String) {
     // Take the handle out first and release the lock before aborting: aborting can drop the
@@ -1050,6 +1056,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             stream_chat_command,
             stop_chat_command,
+            exit_app,
             load_sessions,
             save_sessions,
             load_settings,
