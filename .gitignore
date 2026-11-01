@@ -19,3 +19,9 @@ vite.config.ts.timestamp-*
 dist-android/
 secrets.vault
 secrets.vault.bak
+src-tauri/gen/android/.kotlin/errors/errors-1793507431972.log
+src-tauri/gen/android/.kotlin/errors/errors-1793507431996.log
+src-tauri/gen/android/.kotlin/errors/errors-1793507432044.log
+src-tauri/gen/android/.kotlin/errors/errors-1793527901417.log
+src-tauri/gen/android/.kotlin/errors/errors-1793527901435.log
+src-tauri/gen/android/.kotlin/errors/errors-1793527901445.log
