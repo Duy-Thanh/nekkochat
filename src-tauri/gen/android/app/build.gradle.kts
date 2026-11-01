@@ -25,6 +25,20 @@ android {
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
         versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
     }
+    // Release signing comes from environment variables set by build-android.ps1, so no password
+    // or keystore path is ever stored in a file. Without them the release APK is left unsigned.
+    val keystorePath: String? = System.getenv("TAURI_ANDROID_KEYSTORE_PATH")
+    if (keystorePath != null) {
+        signingConfigs {
+            create("release") {
+                storeFile = file(keystorePath)
+                storePassword = System.getenv("TAURI_ANDROID_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("TAURI_ANDROID_KEY_ALIAS")
+                keyPassword = System.getenv("TAURI_ANDROID_KEY_PASSWORD")
+                storeType = if (keystorePath.endsWith(".p12", true) || keystorePath.endsWith(".pfx", true)) "pkcs12" else "jks"
+            }
+        }
+    }
     buildTypes {
         getByName("debug") {
             manifestPlaceholders["usesCleartextTraffic"] = "true"
@@ -39,6 +53,9 @@ android {
             }
         }
         getByName("release") {
+            if (keystorePath != null) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             optimization {
                enable = true
             }
