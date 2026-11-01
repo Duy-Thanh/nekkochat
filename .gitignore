@@ -8,3 +8,14 @@ node_modules
 !.env.example
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# Secrets and signing material: never commit these
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.pem
+*.key
+dist-android/
+secrets.vault
+secrets.vault.bak
