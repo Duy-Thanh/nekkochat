@@ -3,11 +3,10 @@
   import { invoke } from "@tauri-apps/api/core";
   import { onMount } from "svelte";
   import { settings, PROVIDERS } from "$lib/settings.svelte";
+  import KeyField from "$lib/KeyField.svelte";
   import {
     ArrowLeft,
     ChevronDown,
-    Eye,
-    EyeOff,
     Check,
     Loader2,
     AlertCircle,
@@ -25,8 +24,9 @@
   type ConnectionInfo = { models: string[]; modelsListed: boolean; latencyMs: number };
   type TestResult = { status: "idle" | "testing" | "ok" | "warn" | "error"; message: string };
 
-  let showKey = $state(false);
-  let showEmbedKey = $state(false);
+  // What the user has typed into a key field but not saved yet; only used by the Test buttons
+  let keyDraft = $state("");
+  let embedKeyDraft = $state("");
   let confirmingDelete = $state(false);
 
   // Test results and model suggestions are kept per profile so switching profiles doesn't mix them up
@@ -53,6 +53,7 @@
   $effect(() => {
     active.id;
     confirmingDelete = false;
+    keyDraft = "";
   });
 
   async function testConnection() {
@@ -60,9 +61,10 @@
     connectionTests[profile.id] = { status: "testing", message: "Testing..." };
     try {
       const info = await invoke<ConnectionInfo>("test_connection_command", {
+        profileId: profile.id,
         provider: profile.provider,
         baseUrl: profile.baseUrl,
-        apiKey: profile.apiKey
+        apiKey: keyDraft.trim() || null
       });
       modelSuggestions[profile.id] = info.models;
 
@@ -92,10 +94,11 @@
     embeddingTest = { status: "testing", message: "Testing..." };
     try {
       const msg = await invoke<string>("test_embedding_command", {
+        profileId: profile.id,
         provider: profile.provider,
         baseUrl: profile.baseUrl,
-        apiKey: profile.apiKey,
-        embedding: settings.embedding
+        embedding: settings.embedding,
+        apiKey: embedKeyDraft.trim() || null
       });
       embeddingTest = { status: "ok", message: msg };
     } catch (err) {
@@ -139,7 +142,7 @@
   let changeProblem = $derived(newPass ? passphraseProblem(newPass, newPass2) : "");
 
   function createVault() {
-    return securityAction("Encrypted vault created. Your API keys are now saved in it.", async () => {
+    return securityAction("Encrypted vault created. You can now save API keys.", async () => {
       await settings.createVault(newPass);
       newPass = newPass2 = "";
     });
@@ -183,7 +186,7 @@
       case "vault-locked":
         return { warn: true, text: "The vault is locked. Unlock it in the Security section below to load and save keys." };
       case "vault-missing":
-        return { warn: true, text: "No OS keychain is available, so this key is NOT saved. Set a master password in the Security section below." };
+        return { warn: true, text: "No OS keychain is available, so API keys can't be saved yet. Set a master password in the Security section below." };
     }
   });
 
@@ -347,33 +350,26 @@
 
       {#if active.provider !== "ollama"}
         <div class="flex flex-col gap-1.5">
-          <label for="api-key-input" class={labelClass}>API Key</label>
-          <div class="relative">
-            <input
-              id="api-key-input"
-              type={showKey ? "text" : "password"}
-              bind:value={active.apiKey}
-              placeholder="sk-..."
-              autocomplete="off"
-              spellcheck="false"
-              class="{inputClass} font-mono pr-10"
-            />
-            <button
-              type="button"
-              onclick={() => (showKey = !showKey)}
-              title={showKey ? "Hide key" : "Show key"}
-              class="absolute inset-y-0 right-0 px-3 text-zinc-500 hover:text-zinc-200 cursor-pointer"
-            >
-              {#if showKey}<EyeOff class="w-3.5 h-3.5" />{:else}<Eye class="w-3.5 h-3.5" />{/if}
-            </button>
-          </div>
+          <KeyField
+            id="api-key-input"
+            label="API Key"
+            hasKey={active.hasApiKey}
+            keyOrigin={active.keyOrigin}
+            currentUrl={active.baseUrl}
+            blockedReason={settings.secretsStatus === "vault-locked" || settings.secretsStatus === "vault-missing" ? keyHint.text : ""}
+            bind:draft={keyDraft}
+            onsave={(key) => settings.setApiKey(active.id, key)}
+            onclear={() => settings.clearApiKey(active.id)}
+          />
           {#if settings.keychainWarning}
             <p class="text-[11px] text-amber-400 flex items-start gap-1.5">
               <AlertTriangle class="w-3.5 h-3.5 mt-px shrink-0" />
               <span>{settings.keychainWarning}</span>
             </p>
           {/if}
-          <p class="text-[10px] {keyHint.warn ? 'text-amber-400' : 'text-zinc-600'}">{keyHint.text}</p>
+          {#if !keyHint.warn}
+            <p class="text-[10px] text-zinc-600">{keyHint.text}</p>
+          {/if}
         </div>
       {/if}
 
@@ -438,28 +434,22 @@
         />
       </div>
 
-      <div class="flex flex-col gap-1.5">
-        <label for="embed-key-input" class={labelClass}>Embedding API Key</label>
-        <div class="relative">
-          <input
-            id="embed-key-input"
-            type={showEmbedKey ? "text" : "password"}
-            bind:value={settings.embedApiKey}
-            placeholder="Empty = use the profile's API key"
-            autocomplete="off"
-            spellcheck="false"
-            class="{inputClass} font-mono pr-10"
-          />
-          <button
-            type="button"
-            onclick={() => (showEmbedKey = !showEmbedKey)}
-            title={showEmbedKey ? "Hide key" : "Show key"}
-            class="absolute inset-y-0 right-0 px-3 text-zinc-500 hover:text-zinc-200 cursor-pointer"
-          >
-            {#if showEmbedKey}<EyeOff class="w-3.5 h-3.5" />{:else}<Eye class="w-3.5 h-3.5" />{/if}
-          </button>
-        </div>
-      </div>
+      <KeyField
+        id="embed-key-input"
+        label="Embedding API Key"
+        hasKey={settings.embedHasApiKey}
+        keyOrigin={settings.embedKeyOrigin}
+        currentUrl={settings.embedBaseUrl}
+        placeholder="Empty = use the profile's API key"
+        blockedReason={!settings.embedBaseUrl.trim()
+          ? "Enter the Embedding Base URL above first: a key is tied to the endpoint it is saved for. With no URL, the profile's key is used."
+          : settings.secretsStatus === "vault-locked" || settings.secretsStatus === "vault-missing"
+            ? keyHint.text
+            : ""}
+        bind:draft={embedKeyDraft}
+        onsave={(key) => settings.setEmbeddingKey(key)}
+        onclear={() => settings.clearEmbeddingKey()}
+      />
 
       <div class="flex flex-col gap-1.5">
         <label for="embed-model-input" class={labelClass}>Embedding Model (required for RAG)</label>

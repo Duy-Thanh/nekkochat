@@ -5,19 +5,13 @@ use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use reqwest::Client;
 use serde_json::json;
-use std::time::Duration;
 pub struct AnthropicProvider {
     client: Client,
 }
 
 impl AnthropicProvider {
     pub fn new() -> Self {
-        let client = Client::builder()
-                    // No overall timeout: it would cut long streams. The per-chunk timeout lives in lib.rs
-                    .connect_timeout(Duration::from_secs(15))
-            .tcp_keepalive(std::time::Duration::from_secs(30))
-                    .build()
-                    .unwrap_or_else(|_| Client::new());
+        let client = crate::net::api_client(None);
 
         Self { client }
     }
@@ -65,7 +59,7 @@ impl LlmProvider for AnthropicProvider {
         let res = self
             .client
             .post(&url)
-            .header("x-api-key", api_key)
+            .header("x-api-key", api_key) // never forwarded: redirects are disabled
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")
             .json(&body)
@@ -73,12 +67,18 @@ impl LlmProvider for AnthropicProvider {
             .await
             .map_err(|e| format!("Network error: {}", e))?;
 
+        if res.status().is_redirection() {
+            return Err(format!("The endpoint tried to redirect (HTTP {}); redirects are refused", res.status()));
+        }
         if !res.status().is_success() {
-            let err_text = res.text().await.unwrap_or_default();
+            let err_text = crate::net::truncate(
+                &crate::net::read_text_lossy(res, crate::net::MAX_SMALL_BODY).await,
+                500,
+            );
             return Err(format!("Anthropic API Error: {}", err_text));
         }
 
-        let event_stream = res.bytes_stream().eventsource();
+        let event_stream = crate::net::cap_stream(res.bytes_stream(), crate::net::MAX_STREAM_BYTES).eventsource();
 
         let stream = event_stream.filter_map(|event| async move {
             match event {
@@ -90,10 +90,10 @@ impl LlmProvider for AnthropicProvider {
                                 .unwrap_or("unknown stream error")
                                 .to_string()));
                         }
-                        if parsed["type"] == "content_block_delta" {
-                            if let Some(text) = parsed["delta"]["text"].as_str() {
-                                return Some(Ok(text.to_string()));
-                            }
+                        if parsed["type"] == "content_block_delta"
+                            && let Some(text) = parsed["delta"]["text"].as_str()
+                        {
+                            return Some(Ok(text.to_string()));
                         }
                     }
                     None

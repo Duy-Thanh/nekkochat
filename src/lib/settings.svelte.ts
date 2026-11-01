@@ -1,6 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 
-export type EmbeddingConfig = { baseUrl: string; apiKey: string; model: string };
+/**
+ * API keys never live in this file's state. They are sent to Rust once (`setApiKey`) and stay
+ * there: the frontend only knows whether a key exists (`hasApiKey`) and which origin it is bound
+ * to (`keyOrigin`). A compromised page therefore has no key to read.
+ */
+export type EmbeddingConfig = { baseUrl: string; model: string };
 
 /** A named connection config. Every field is free text entered by the user. */
 export type Profile = {
@@ -8,18 +13,22 @@ export type Profile = {
   name: string;
   provider: string;
   baseUrl: string;
-  apiKey: string;
   model: string;
+  /** Derived from secure storage by Rust */
+  hasApiKey: boolean;
+  /** The origin the saved key is bound to; the key is only ever sent there */
+  keyOrigin: string;
 };
+
+type KeyInfo = { hasApiKey: boolean; keyOrigin: string };
 
 type StoredSettings = {
   activeProfileId: string;
   profiles: Profile[];
-  embedding: EmbeddingConfig;
+  embedding: EmbeddingConfig & Partial<KeyInfo>;
   // Legacy single-provider fields, only present in settings.json written by older versions
   provider?: string;
   baseUrl?: string;
-  apiKey?: string;
   model?: string;
 };
 
@@ -39,14 +48,24 @@ export const PROVIDERS = [
 
 const SAVE_DEBOUNCE_MS = 500;
 
+/** Same normalisation Rust uses for the origin a key is bound to; empty if the URL is invalid. */
+export function originOf(url: string): string {
+  try {
+    return new URL(url.trim()).origin;
+  } catch {
+    return "";
+  }
+}
+
 function newProfile(overrides: Partial<Profile> = {}): Profile {
   return {
     id: crypto.randomUUID(),
     name: "New profile",
     provider: "openai",
     baseUrl: "https://api.openai.com/v1",
-    apiKey: "",
     model: "",
+    hasApiKey: false,
+    keyOrigin: "",
     ...overrides
   };
 }
@@ -63,20 +82,28 @@ class SettingsStore {
   profiles = $state<Profile[]>([defaultProfile()]);
   activeId = $state("");
   embedBaseUrl = $state("");
-  embedApiKey = $state("");
   embedModel = $state("");
+  embedHasApiKey = $state(false);
+  embedKeyOrigin = $state("");
 
   loaded = $state(false);
   saveState = $state<SaveState>("idle");
   saveError = $state("");
-  /** Set when API keys could not be saved or read from secure storage. */
+  /** Warnings from secure storage (a key that could not be read, a legacy key left behind...). */
   keychainWarning = $state("");
   secretsStatus = $state<SecretsStatus>("keychain");
   /** The user chose "continue without keys" on the unlock prompt for this session. */
   unlockDismissed = $state(false);
+  /**
+   * Bumped whenever the vault is created, unlocked, locked or reset. Chat history and documents
+   * are encrypted with the same secure storage, so the pages reload them when this changes.
+   */
+  dataEpoch = $state(0);
 
   #loading: Promise<void> | null = null;
   #savedTimer: ReturnType<typeof setTimeout> | undefined;
+  #saving = false;
+  #saveQueued = false;
 
   constructor() {
     this.activeId = this.profiles[0].id;
@@ -85,10 +112,10 @@ class SettingsStore {
     // The timer lives in the effect, so it keeps running when the user leaves the Settings page.
     $effect.root(() => {
       $effect(() => {
-        const snapshot = this.#snapshot();
+        this.#snapshot(); // subscribe to every saved field
         if (!this.loaded) return;
         this.saveState = "pending";
-        const t = setTimeout(() => this.#save(snapshot), SAVE_DEBOUNCE_MS);
+        const t = setTimeout(() => this.#save(), SAVE_DEBOUNCE_MS);
         return () => clearTimeout(t);
       });
     });
@@ -105,19 +132,16 @@ class SettingsStore {
   get baseUrl() {
     return this.active.baseUrl;
   }
-  get apiKey() {
-    return this.active.apiKey;
-  }
   get model() {
     return this.active.model;
   }
 
   get embedding(): EmbeddingConfig {
-    return { baseUrl: this.embedBaseUrl.trim(), apiKey: this.embedApiKey, model: this.embedModel.trim() };
+    return { baseUrl: this.embedBaseUrl.trim(), model: this.embedModel.trim() };
   }
 
   get isConfigured() {
-    return this.provider === "ollama" || this.apiKey.trim().length > 0;
+    return this.provider === "ollama" || this.active.hasApiKey;
   }
 
   /** Loads once, however many pages call it. */
@@ -139,26 +163,26 @@ class SettingsStore {
         this.keychainWarning = result.warnings.join(" ");
         this.secretsStatus = result.secrets;
         if (saved.profiles?.length) {
-          this.profiles = saved.profiles;
+          this.profiles = saved.profiles.map((p) => ({ ...newProfile(), ...p }));
           this.activeId = saved.profiles.some((p) => p.id === saved.activeProfileId)
             ? saved.activeProfileId
             : saved.profiles[0].id;
         } else if (saved.provider) {
-          // Migrate the old single-provider format into one profile
+          // Migrate the old single-provider format into one profile (its key is not carried over)
           const label = PROVIDERS.find((p) => p.id === saved.provider)?.label ?? "Default";
           const migrated = newProfile({
             name: label,
             provider: saved.provider,
             baseUrl: saved.baseUrl ?? "",
-            apiKey: saved.apiKey ?? "",
             model: saved.model ?? ""
           });
           this.profiles = [migrated];
           this.activeId = migrated.id;
         }
         this.embedBaseUrl = saved.embedding?.baseUrl ?? "";
-        this.embedApiKey = saved.embedding?.apiKey ?? "";
         this.embedModel = saved.embedding?.model ?? "";
+        this.embedHasApiKey = saved.embedding?.hasApiKey ?? false;
+        this.embedKeyOrigin = saved.embedding?.keyOrigin ?? "";
       }
     } catch (err) {
       // Keep loaded=true: the user can still work with the defaults
@@ -168,24 +192,57 @@ class SettingsStore {
     }
   }
 
+  // ---- API keys: write-only ----
+
+  /** Saves a key for a profile, bound to that profile's current Base URL. */
+  async setApiKey(profileId: string, apiKey: string) {
+    const profile = this.profiles.find((p) => p.id === profileId);
+    if (!profile) throw "Unknown profile";
+    const info = await invoke<KeyInfo>("set_api_key", { profileId, apiKey, baseUrl: profile.baseUrl });
+    profile.hasApiKey = info.hasApiKey;
+    profile.keyOrigin = info.keyOrigin;
+  }
+
+  async clearApiKey(profileId: string) {
+    const profile = this.profiles.find((p) => p.id === profileId);
+    const info = await invoke<KeyInfo>("clear_api_key", { profileId });
+    if (profile) {
+      profile.hasApiKey = info.hasApiKey;
+      profile.keyOrigin = info.keyOrigin;
+    }
+  }
+
+  async setEmbeddingKey(apiKey: string) {
+    const info = await invoke<KeyInfo>("set_embedding_key", { apiKey, baseUrl: this.embedBaseUrl });
+    this.embedHasApiKey = info.hasApiKey;
+    this.embedKeyOrigin = info.keyOrigin;
+  }
+
+  async clearEmbeddingKey() {
+    const info = await invoke<KeyInfo>("clear_embedding_key");
+    this.embedHasApiKey = info.hasApiKey;
+    this.embedKeyOrigin = info.keyOrigin;
+  }
+
   // ---- Secure storage (OS keychain, or the encrypted vault when there is none) ----
 
-  /** Creates the encrypted vault, then saves so keys typed beforehand are stored in it. */
   async createVault(passphrase: string) {
     this.secretsStatus = await invoke<SecretsStatus>("vault_create", { passphrase });
-    await this.#save(this.#snapshot());
+    this.dataEpoch++;
   }
 
   async unlockVault(passphrase: string) {
     this.secretsStatus = await invoke<SecretsStatus>("vault_unlock", { passphrase });
-    await this.#restoreKeys();
+    await this.#refreshKeyInfo();
+    this.dataEpoch++;
   }
 
-  /** Locks the vault and wipes the keys from this window's memory too. */
+  /** Locks the vault. Rust forgets the decrypted keys, so no key is usable until unlock. */
   async lockVault() {
     this.secretsStatus = await invoke<SecretsStatus>("vault_lock");
-    this.#clearKeys();
+    this.#markKeysUnavailable();
     this.unlockDismissed = false;
+    this.dataEpoch++;
   }
 
   async changePassphrase(oldPassphrase: string, newPassphrase: string) {
@@ -198,27 +255,36 @@ class SettingsStore {
   /** Deletes the vault and every key in it (for a forgotten master password). */
   async resetVault() {
     this.secretsStatus = await invoke<SecretsStatus>("vault_reset");
-    this.#clearKeys();
+    this.#markKeysUnavailable();
+    this.dataEpoch++;
   }
 
-  #clearKeys() {
-    for (const p of this.profiles) p.apiKey = "";
-    this.embedApiKey = "";
+  #markKeysUnavailable() {
+    for (const p of this.profiles) {
+      p.hasApiKey = false;
+      p.keyOrigin = "";
+    }
+    this.embedHasApiKey = false;
+    this.embedKeyOrigin = "";
   }
 
-  /** Re-reads keys from secure storage into empty fields, without touching anything else. */
-  async #restoreKeys() {
+  /** Re-reads which keys exist (not the keys themselves) after the vault changes state. */
+  async #refreshKeyInfo() {
     const result = await invoke<{ settings: StoredSettings; warnings: string[] } | null>("load_settings");
     if (!result) return;
     this.keychainWarning = result.warnings.join(" ");
     for (const stored of result.settings.profiles ?? []) {
       const local = this.profiles.find((p) => p.id === stored.id);
-      if (local && !local.apiKey && stored.apiKey) local.apiKey = stored.apiKey;
+      if (local) {
+        local.hasApiKey = stored.hasApiKey ?? false;
+        local.keyOrigin = stored.keyOrigin ?? "";
+      }
     }
-    if (!this.embedApiKey && result.settings.embedding?.apiKey) {
-      this.embedApiKey = result.settings.embedding.apiKey;
-    }
+    this.embedHasApiKey = result.settings.embedding?.hasApiKey ?? false;
+    this.embedKeyOrigin = result.settings.embedding?.keyOrigin ?? "";
   }
+
+  // ---- Profiles ----
 
   addProfile() {
     const profile = newProfile({ name: this.#uniqueName("New profile") });
@@ -226,9 +292,16 @@ class SettingsStore {
     this.activeId = profile.id;
   }
 
+  /** Copies everything except the key: keys are bound to an endpoint and are never copied around. */
   duplicateActive() {
     const src = $state.snapshot(this.active);
-    const copy = newProfile({ ...src, id: crypto.randomUUID(), name: this.#uniqueName(`${src.name} copy`) });
+    const copy = newProfile({
+      ...src,
+      id: crypto.randomUUID(),
+      name: this.#uniqueName(`${src.name} copy`),
+      hasApiKey: false,
+      keyOrigin: ""
+    });
     this.profiles.push(copy);
     this.activeId = copy.id;
   }
@@ -263,19 +336,27 @@ class SettingsStore {
     return `${base} ${i}`;
   }
 
-  #snapshot(): StoredSettings {
+  #snapshot() {
     return {
       activeProfileId: this.activeId,
       profiles: $state.snapshot(this.profiles),
-      embedding: { baseUrl: this.embedBaseUrl, apiKey: this.embedApiKey, model: this.embedModel }
+      embedding: { baseUrl: this.embedBaseUrl, model: this.embedModel }
     };
   }
 
-  async #save(snapshot: StoredSettings) {
+  /** One save at a time, always the latest state, so an older snapshot can never overwrite a newer one. */
+  async #save() {
+    if (this.#saving) {
+      this.#saveQueued = true;
+      return;
+    }
+    this.#saving = true;
     this.saveState = "saving";
     try {
-      const warnings = await invoke<string[]>("save_settings", { settings: snapshot });
-      this.keychainWarning = warnings.join(" ");
+      do {
+        this.#saveQueued = false;
+        await invoke("save_settings", { settings: this.#snapshot() });
+      } while (this.#saveQueued);
       this.saveState = "saved";
       this.saveError = "";
       clearTimeout(this.#savedTimer);
@@ -286,6 +367,8 @@ class SettingsStore {
       console.error("Failed to save settings:", err);
       this.saveError = String(err);
       this.saveState = "error";
+    } finally {
+      this.#saving = false;
     }
   }
 }

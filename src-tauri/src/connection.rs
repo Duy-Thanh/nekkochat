@@ -1,4 +1,6 @@
-use crate::types::{ConnectionInfo, EmbeddingConfig};
+use crate::net;
+use crate::rag::ResolvedEmbedding;
+use crate::types::ConnectionInfo;
 use reqwest::Client;
 use serde_json::Value;
 use std::time::{Duration, Instant};
@@ -37,11 +39,6 @@ fn parse_models(body: &Value) -> Vec<String> {
     ids
 }
 
-fn truncate(s: &str, max: usize) -> String {
-    let t: String = s.chars().take(max).collect();
-    if s.chars().count() > max { format!("{}...", t) } else { t }
-}
-
 /// Non-destructive connectivity check: lists models. Does not send any chat request.
 /// A 404/405 means the server is reachable but has no model listing, which is reported
 /// as `models_listed = false` rather than as a failure.
@@ -54,6 +51,7 @@ pub async fn test_connection(
     if base_url.trim().is_empty() {
         return Err("Base URL is empty".to_string());
     }
+    net::validate_endpoint(base_url)?;
     let url = models_url(provider, base_url);
 
     let mut req = client.get(&url).timeout(TEST_TIMEOUT);
@@ -82,25 +80,25 @@ pub async fn test_connection(
     if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::METHOD_NOT_ALLOWED {
         return Ok(ConnectionInfo { models: Vec::new(), models_listed: false, latency_ms });
     }
+    if status.is_redirection() {
+        return Err(format!("The endpoint tried to redirect (HTTP {}); redirects are refused", status));
+    }
     if !status.is_success() {
-        let body = res.text().await.unwrap_or_default();
+        let body = net::read_text_lossy(res, net::MAX_SMALL_BODY).await;
         let hint = match status.as_u16() {
             401 | 403 => " (check the API key)",
             _ => "",
         };
-        return Err(format!("HTTP {}{}: {}", status.as_u16(), hint, truncate(&body, 300)));
+        return Err(format!("HTTP {}{}: {}", status.as_u16(), hint, net::truncate(&body, 300)));
     }
 
-    let body: Value = res
-        .json()
-        .await
-        .map_err(|e| format!("Server responded but the body is not valid JSON: {}", e))?;
+    let body: Value = net::read_json_limited(res, net::MAX_SMALL_BODY).await?;
     let models = parse_models(&body);
     Ok(ConnectionInfo { models_listed: !models.is_empty(), models, latency_ms })
 }
 
 /// Embeds a short string and reports the vector size.
-pub async fn test_embedding(client: &Client, cfg: &EmbeddingConfig) -> Result<String, String> {
+pub async fn test_embedding(client: &Client, cfg: &ResolvedEmbedding) -> Result<String, String> {
     let started = Instant::now();
     let v = crate::rag::embed(client, cfg, "connection test", true).await?;
     Ok(format!(

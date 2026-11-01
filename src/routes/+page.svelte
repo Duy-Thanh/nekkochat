@@ -1,13 +1,12 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
-  import { open } from "@tauri-apps/plugin-dialog";
   import { onMount } from "svelte";
   import { goto } from "$app/navigation";
   import { settings } from "$lib/settings.svelte";
   import Markdown from '$lib/Markdown.svelte';
   import ThinkingBlock from '$lib/ThinkingBlock.svelte';
-  import { SYSTEM_PRESETS, type SystemPreset } from '$lib/presets';
+  import { SYSTEM_PRESETS, PRESET_CATEGORIES, findPreset, type SystemPreset } from '$lib/presets';
 
   import {
     X,
@@ -28,7 +27,8 @@
     Check,
     AlertTriangle,
     Pencil,
-    Search
+    Search,
+    ChevronDown
   } from '@lucide/svelte';
 
   type Message = {
@@ -44,7 +44,7 @@
     messages: Message[];
   };
 
-  type DocumentInfo = { fileName: string; chunks: number; model: string; sourcePath: string };
+  type DocumentInfo = { fileName: string; chunks: number; model: string; canReindex: boolean };
 
   let inputPrompt = $state("");
 
@@ -54,9 +54,18 @@
   // Each session streams independently, so the user can switch chats while one is generating
   let generatingIds = $state<string[]>([]);
   let loadError = $state("");
+  // Whether chat history can be saved. It is encrypted, so it needs the OS keychain or an
+  // unlocked vault; otherwise chats stay in memory and the user is told why.
+  type Persistence = "ok" | "locked" | "unavailable";
+  let persistence = $state<Persistence>("ok");
+  let persistenceMessage = $state("");
 
   // Presets UI State
   let isPresetModalOpen = $state(false);
+  let presetSearch = $state("");
+  let expandedPresetId = $state<string | null>(null);
+  let customPromptDraft = $state("");
+  const MAX_CUSTOM_PROMPT = 20000;
 
   // RAG State
   let isIndexing = $state(false);
@@ -111,31 +120,79 @@
 
   // ---- Persistence ----
 
+  type SessionsLoad = { sessions: ChatSession[]; persistence: Persistence; message: string };
+
   async function loadSessions() {
+    loadError = "";
     try {
-      const savedSessions = await invoke<ChatSession[]>("load_sessions");
-      if (savedSessions && savedSessions.length > 0) {
-        sessions = savedSessions.map(s => ({
+      const res = await invoke<SessionsLoad>("load_sessions");
+      persistence = res.persistence;
+      persistenceMessage = res.message;
+      historyReady = true;
+      if (res.sessions.length > 0) {
+        const loaded = res.sessions.map(s => ({
           ...s,
           systemPrompt: s.systemPrompt || SYSTEM_PRESETS[0].prompt
         }));
-        currentSessionId = sessions[0].id;
+        // Keep chats that were started while the history was unavailable
+        const started = sessions.filter(s => s.messages.length > 0 && !loaded.some(l => l.id === s.id));
+        sessions = [...started, ...loaded];
+        if (!sessions.some(s => s.id === currentSessionId)) currentSessionId = sessions[0].id;
         return;
       }
     } catch (err) {
       console.error("Failed to load sessions:", err);
       loadError = String(err);
     }
-    createNewSession();
+    if (sessions.length === 0) createNewSession();
   }
 
+  // One save at a time, always the latest state: concurrent invocations could otherwise be
+  // handled out of order and let an older snapshot overwrite a newer one.
+  let sessionsSaving = false;
+  let sessionsSaveQueued = false;
   async function saveSessions() {
+    // Nothing may be written while the history cannot be encrypted, and never before the stored
+    // history has been read successfully: saving then would overwrite it with an empty list.
+    if (persistence !== "ok" || !historyReady) return;
+    if (sessionsSaving) {
+      sessionsSaveQueued = true;
+      return;
+    }
+    sessionsSaving = true;
     try {
-      await invoke("save_sessions", { sessions: $state.snapshot(sessions) });
+      do {
+        sessionsSaveQueued = false;
+        await invoke("save_sessions", { sessions: $state.snapshot(sessions) });
+      } while (sessionsSaveQueued);
+      if (saveFailure) saveFailure = "";
     } catch (err) {
       console.error("Failed to save sessions:", err);
+      saveFailure = String(err);
+    } finally {
+      sessionsSaving = false;
     }
   }
+  let saveFailure = $state("");
+  let historyReady = false;
+
+  // The vault was created, unlocked, locked or reset: history and documents follow it
+  let seenDataEpoch = settings.dataEpoch;
+  $effect(() => {
+    const epoch = settings.dataEpoch;
+    if (epoch === seenDataEpoch) return;
+    seenDataEpoch = epoch;
+    if (settings.secretsStatus === "vault-locked") {
+      // Locking means the decrypted history is no longer on screen either
+      sessions = [];
+      currentSessionId = "";
+      documents = [];
+    }
+    loadSessions().then(async () => {
+      await refreshDocuments();
+      await saveSessions(); // persist chats that were started while history could not be saved
+    });
+  });
 
   // Write to disk on a timer instead of on every token
   let saveTimer: ReturnType<typeof setTimeout> | undefined;
@@ -161,12 +218,49 @@
     saveSessions();
   }
 
-  function applyPreset(preset: SystemPreset) {
+  // The preset the current chat is using, or undefined when its prompt was edited by hand
+  let activePreset = $derived(findPreset(currentSession?.systemPrompt ?? ""));
+
+  let presetGroups = $derived.by(() => {
+    const q = presetSearch.trim().toLowerCase();
+    const matches = SYSTEM_PRESETS.filter(p =>
+      !q || `${p.name} ${p.description} ${p.category}`.toLowerCase().includes(q)
+    );
+    return PRESET_CATEGORIES
+      .map(category => ({ category, items: matches.filter(p => p.category === category) }))
+      .filter(g => g.items.length > 0);
+  });
+
+  function openPresetModal() {
+    customPromptDraft = currentSession?.systemPrompt ?? "";
+    presetSearch = "";
+    expandedPresetId = null;
+    isPresetModalOpen = true;
+  }
+
+  function closePresetModal() {
+    isPresetModalOpen = false;
+  }
+
+  function setSystemPrompt(prompt: string) {
     if (currentSession) {
-      currentSession.systemPrompt = preset.prompt;
+      currentSession.systemPrompt = prompt;
       saveSessions();
     }
-    isPresetModalOpen = false;
+    closePresetModal();
+  }
+
+  function applyPreset(preset: SystemPreset) {
+    setSystemPrompt(preset.prompt);
+  }
+
+  function applyCustomPrompt() {
+    const prompt = customPromptDraft.trim();
+    if (prompt) setSystemPrompt(prompt);
+  }
+
+  function focusOnMount(node: HTMLElement) {
+    node.focus();
   }
 
   // ---- Chat history sidebar ----
@@ -300,38 +394,23 @@
     }
   }
 
-  async function handlePickAndIndexFile() {
-    let selected: string | string[] | null;
-    try {
-      selected = await open({
-        multiple: true,
-        filters: [{
-          name: 'Documents & Code',
-          extensions: ['txt', 'md', 'rs', 'py', 'c', 'cpp', 'h', 'js', 'ts', 'json', 'svelte', 'html', 'css', 'toml', 'yaml', 'yml', 'csv', 'log', 'go', 'java', 'kt', 'sh']
-        }]
-      });
-    } catch (err) {
-      showRagStatus(`[File picker error]: ${err}`);
-      return;
-    }
-    if (!selected) return;
-    await indexPaths(Array.isArray(selected) ? selected : [selected]);
+  // Files are chosen in a native dialog that Rust opens, and re-indexing uses the path Rust
+  // recorded itself. This page never sees or supplies a file path.
+  function indexArgs() {
+    return {
+      profileId: settings.active.id,
+      provider: settings.provider,
+      baseUrl: settings.baseUrl,
+      embedding: settings.embedding
+    };
   }
 
-  async function indexPaths(paths: string[]) {
+  async function runIndexing(command: string, args: Record<string, unknown>) {
     isIndexing = true;
     try {
-      for (const filePath of paths) {
-        const name = filePath.split(/[/\\]/).pop() || filePath;
-        showRagStatus(`Creating embeddings: ${name}...`, false);
-        showRagStatus(await invoke<string>("index_document_command", {
-          provider: settings.provider,
-          baseUrl: settings.baseUrl,
-          apiKey: settings.apiKey,
-          embedding: settings.embedding,
-          filePath
-        }));
-      }
+      const done = await invoke<string[]>(command, args);
+      if (done.length) showRagStatus(done.join(" · "));
+      else ragStatusMsg = ""; // the user cancelled the dialog
     } catch (err) {
       console.error("Indexing error:", err);
       showRagStatus(`[Indexing error]: ${err}`, true, true);
@@ -341,9 +420,11 @@
     }
   }
 
+  const handlePickAndIndexFile = () => runIndexing("pick_and_index_documents", indexArgs());
+
   async function reindexStale() {
-    const paths = documents.filter(d => isStale(d) && d.sourcePath).map(d => d.sourcePath);
-    if (paths.length) await indexPaths(paths);
+    const fileNames = documents.filter(d => isStale(d) && d.canReindex).map(d => d.fileName);
+    if (fileNames.length) await runIndexing("reindex_documents", { ...indexArgs(), fileNames });
   }
 
   async function removeDocument(fileName: string) {
@@ -442,9 +523,9 @@
       await invoke("stream_chat_command", {
         payload: {
           sessionId: sess.id,
+          profileId: settings.active.id,
           provider: settings.provider,
           baseUrl: settings.baseUrl,
-          apiKey: settings.apiKey,
           model: settings.model,
           messages: context,
           embedding: settings.embedding
@@ -507,31 +588,121 @@
 
   <!-- System Preset Selection Modal -->
   {#if isPresetModalOpen}
-    <div class="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
-      <div class="bg-[#13151a] border border-zinc-800 rounded-2xl w-full max-w-lg p-5 flex flex-col gap-4 shadow-2xl">
-        <div class="flex items-center justify-between border-b border-zinc-800 pb-3">
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4 backdrop-blur-sm"
+      onkeydown={(e) => e.key === "Escape" && closePresetModal()}
+    >
+      <div
+        class="bg-[#13151a] border border-zinc-800 rounded-2xl w-full max-w-2xl max-h-[88dvh] p-5 flex flex-col gap-3 shadow-2xl"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="preset-title"
+      >
+        <div class="flex items-center justify-between border-b border-zinc-800 pb-3 shrink-0">
           <div class="flex items-center gap-2">
             <Sparkles class="w-4 h-4 text-emerald-400" />
-            <h3 class="font-bold text-sm text-zinc-100">Choose a Role (System Prompt Preset)</h3>
+            <h3 id="preset-title" class="font-bold text-sm text-zinc-100">Choose a Role (System Prompt)</h3>
           </div>
-          <button onclick={() => isPresetModalOpen = false} class="text-zinc-400 hover:text-white p-1">
+          <button onclick={closePresetModal} class="text-zinc-400 hover:text-white p-1 cursor-pointer" title="Close">
             <X class="w-4 h-4" />
           </button>
         </div>
 
-        <div class="flex flex-col gap-2 max-h-96 overflow-y-auto pr-1">
-          {#each SYSTEM_PRESETS as preset}
-            <button 
-              onclick={() => applyPreset(preset)}
-              class="flex flex-col items-start p-3 rounded-xl border border-zinc-800/80 bg-[#181b22] hover:bg-zinc-800/50 hover:border-emerald-500/50 text-left transition-all group cursor-pointer"
-            >
-              <div class="flex items-center gap-2 font-bold text-xs text-zinc-200 group-hover:text-emerald-400">
-                <span>{preset.icon}</span>
-                <span>{preset.name}</span>
+        <div class="relative shrink-0">
+          <Search class="w-3.5 h-3.5 absolute left-3 top-2.5 text-zinc-500 pointer-events-none" />
+          <input
+            use:focusOnMount
+            type="text"
+            bind:value={presetSearch}
+            placeholder="Search roles..."
+            aria-label="Search roles"
+            class="w-full bg-[#1a1d24] border border-zinc-800/80 rounded-xl pl-8 pr-3 py-2 text-xs text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-emerald-500/50"
+          />
+        </div>
+
+        <div class="flex flex-col gap-4 overflow-y-auto min-h-0 pr-1">
+          {#each presetGroups as group (group.category)}
+            <section>
+              <h4 class="text-[10px] font-semibold text-zinc-500 tracking-wider uppercase px-1 mb-1.5">{group.category}</h4>
+              <div class="flex flex-col gap-1.5">
+                {#each group.items as preset (preset.id)}
+                  {@const isActive = activePreset?.id === preset.id}
+                  {@const isOpen = expandedPresetId === preset.id}
+                  <div class="rounded-xl border bg-[#181b22] transition-colors
+                    {isActive ? 'border-emerald-500/60' : 'border-zinc-800/80 hover:border-zinc-700'}">
+                    <div class="flex items-stretch">
+                      <button
+                        onclick={() => applyPreset(preset)}
+                        class="flex-1 min-w-0 flex flex-col items-start p-3 text-left cursor-pointer group"
+                      >
+                        <div class="flex items-center gap-2 font-bold text-xs text-zinc-200 group-hover:text-emerald-400">
+                          <span>{preset.icon}</span>
+                          <span class="truncate">{preset.name}</span>
+                          {#if isActive}
+                            <span class="flex items-center gap-1 text-[10px] font-semibold text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 rounded-full px-2 py-px">
+                              <Check class="w-3 h-3" /> In use
+                            </span>
+                          {/if}
+                        </div>
+                        <p class="text-[11px] text-zinc-400 mt-1 leading-relaxed">{preset.description}</p>
+                      </button>
+                      <button
+                        onclick={() => (expandedPresetId = isOpen ? null : preset.id)}
+                        aria-expanded={isOpen}
+                        title={isOpen ? "Hide the full prompt" : "Show the full prompt"}
+                        class="px-3 text-zinc-500 hover:text-zinc-200 cursor-pointer shrink-0"
+                      >
+                        <ChevronDown class="w-4 h-4 transition-transform {isOpen ? 'rotate-180' : ''}" />
+                      </button>
+                    </div>
+                    {#if isOpen}
+                      <pre class="mx-3 p-3 rounded-lg bg-[#0e0f12] border border-zinc-800/80 text-[11px] leading-relaxed text-zinc-400 whitespace-pre-wrap font-mono max-h-56 overflow-y-auto">{preset.prompt}</pre>
+                      <div class="px-3 py-2">
+                        <button
+                          onclick={() => (customPromptDraft = preset.prompt)}
+                          class="text-[11px] text-zinc-500 hover:text-emerald-400 underline underline-offset-2 cursor-pointer"
+                        >
+                          Copy into the editor below to customise it
+                        </button>
+                      </div>
+                    {/if}
+                  </div>
+                {/each}
               </div>
-              <p class="text-[11px] text-zinc-400 mt-1 leading-relaxed">{preset.description}</p>
-            </button>
+            </section>
+          {:else}
+            <p class="text-[11px] text-zinc-600 text-center py-4">No roles match "{presetSearch}".</p>
           {/each}
+        </div>
+
+        <!-- Custom system prompt -->
+        <div class="border-t border-zinc-800 pt-3 flex flex-col gap-2 shrink-0">
+          <div class="flex items-center justify-between">
+            <label for="custom-prompt" class="text-[10px] font-semibold text-zinc-400 tracking-wider uppercase">
+              Custom system prompt {activePreset ? "" : "(in use)"}
+            </label>
+            <span class="text-[10px] font-mono {customPromptDraft.length > MAX_CUSTOM_PROMPT ? 'text-red-400' : 'text-zinc-600'}">
+              {customPromptDraft.length}/{MAX_CUSTOM_PROMPT}
+            </span>
+          </div>
+          <textarea
+            id="custom-prompt"
+            bind:value={customPromptDraft}
+            rows="4"
+            placeholder="Write your own instructions for this chat, or start from a role above and edit it here."
+            class="w-full bg-[#1a1d24] border border-zinc-800/80 rounded-xl px-3 py-2 text-xs text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-emerald-500/50 resize-y max-h-48"
+          ></textarea>
+          <div class="flex items-center justify-between gap-2">
+            <span class="text-[10px] text-zinc-600">Applies to this chat only.</span>
+            <button
+              onclick={applyCustomPrompt}
+              disabled={!customPromptDraft.trim() || customPromptDraft.length > MAX_CUSTOM_PROMPT}
+              class="bg-emerald-500 hover:bg-emerald-400 disabled:bg-zinc-800/50 disabled:text-zinc-600 text-zinc-950 font-semibold px-4 py-2 rounded-xl text-xs transition-all cursor-pointer disabled:cursor-not-allowed"
+            >
+              Use this prompt
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -719,12 +890,17 @@
       <!-- Action Control Header -->
       <div class="flex items-center gap-2">
         <button 
-          onclick={() => isPresetModalOpen = true}
-          class="flex items-center gap-1.5 px-3 py-1 rounded-xl bg-zinc-800/60 hover:bg-zinc-800 text-zinc-300 border border-zinc-700/50 text-xs font-medium transition-all cursor-pointer"
-          title="Choose system prompt role"
+          onclick={openPresetModal}
+          class="flex items-center gap-1.5 px-3 py-1 rounded-xl bg-zinc-800/60 hover:bg-zinc-800 text-zinc-300 border border-zinc-700/50 text-xs font-medium transition-all cursor-pointer max-w-56"
+          title="Choose the role (system prompt) for this chat"
         >
-          <SlidersHorizontal class="w-3.5 h-3.5 text-emerald-400" />
-          <span>Role Persona</span>
+          {#if activePreset}
+            <span>{activePreset.icon}</span>
+            <span class="truncate">{activePreset.name}</span>
+          {:else}
+            <SlidersHorizontal class="w-3.5 h-3.5 text-emerald-400" />
+            <span class="truncate">Custom prompt</span>
+          {/if}
         </button>
 
         <span class="text-[10px] font-semibold px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono uppercase">
@@ -735,6 +911,27 @@
 
     <!-- Chat Messages -->
     <div bind:this={chatContainer} class="flex-1 overflow-y-auto p-4 md:p-8 space-y-6">
+      {#if persistence !== "ok"}
+        <div class="max-w-xl mx-auto flex items-center justify-between gap-3 text-xs text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-xl px-4 py-3">
+          <span>{persistenceMessage}</span>
+          {#if persistence === "locked"}
+            <button onclick={() => (settings.unlockDismissed = false)} class="font-semibold underline underline-offset-2 hover:text-amber-200 cursor-pointer shrink-0">
+              Unlock
+            </button>
+          {:else}
+            <button onclick={() => goto("/settings")} class="font-semibold underline underline-offset-2 hover:text-amber-200 cursor-pointer shrink-0">
+              Open Settings
+            </button>
+          {/if}
+        </div>
+      {/if}
+
+      {#if saveFailure}
+        <div class="max-w-xl mx-auto text-xs text-red-300 bg-red-500/10 border border-red-500/30 rounded-xl px-4 py-3 break-words" role="alert">
+          Couldn't save your chats: {saveFailure}
+        </div>
+      {/if}
+
       {#if loadError}
         <div class="max-w-xl mx-auto text-xs text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-xl px-4 py-3">
           Couldn't read previous chat history: {loadError}
@@ -870,7 +1067,7 @@
                   <FileText class="w-3 h-3 text-emerald-400" />
                 {/if}
                 <span>{doc.fileName}</span>
-                {#if stale && doc.sourcePath}
+                {#if stale && doc.canReindex}
                   <button
                     onclick={reindexStale}
                     disabled={isIndexing}

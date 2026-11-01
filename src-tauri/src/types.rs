@@ -10,9 +10,10 @@ pub struct ChatMessage {
 #[serde(rename_all = "camelCase")]
 pub struct ChatPayload {
     pub session_id: String,
+    /// The API key is looked up in Rust by profile id; the frontend never holds it
+    pub profile_id: String,
     pub provider: String,
     pub base_url: String,
-    pub api_key: String,
     pub model: String,
     pub messages: Vec<ChatMessage>,
     #[serde(default)]
@@ -38,9 +39,22 @@ pub struct EmbeddingConfig {
     #[serde(default)]
     pub base_url: String,
     #[serde(default)]
-    pub api_key: String,
-    #[serde(default)]
     pub model: String,
+
+    /// Only read from settings.json written by older versions, so the key can be migrated into
+    /// secure storage. Never serialised, so it can reach neither the file nor the frontend.
+    #[serde(default, skip_serializing)]
+    pub api_key: String,
+    /// Derived from secure storage; ignored when received from the frontend.
+    #[serde(default, skip_deserializing, skip_serializing_if = "is_false")]
+    pub has_api_key: bool,
+    /// The origin the saved key is bound to (empty when there is no key).
+    #[serde(default, skip_deserializing, skip_serializing_if = "String::is_empty")]
+    pub key_origin: String,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// A named connection config. Every field is entered by the user.
@@ -51,8 +65,17 @@ pub struct Profile {
     pub name: String,
     pub provider: String,
     pub base_url: String,
-    pub api_key: String,
     pub model: String,
+
+    /// Legacy, read-only: see `EmbeddingConfig::api_key`.
+    #[serde(default, skip_serializing)]
+    pub api_key: String,
+    /// Derived from secure storage; ignored when received from the frontend.
+    #[serde(default, skip_deserializing, skip_serializing_if = "is_false")]
+    pub has_api_key: bool,
+    /// The origin the saved key is bound to (empty when there is no key).
+    #[serde(default, skip_deserializing, skip_serializing_if = "String::is_empty")]
+    pub key_origin: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,6 +98,26 @@ pub struct Settings {
     pub api_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+}
+
+/// Whether chat history can be saved right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Persistence {
+    /// History is encrypted and saved normally
+    Ok,
+    /// The vault is locked: history is hidden and cannot be saved until it is unlocked
+    Locked,
+    /// There is no secure storage at all (no OS keychain and no vault yet), so history is not saved
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionsLoad {
+    pub sessions: Vec<ChatSession>,
+    pub persistence: Persistence,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -115,7 +158,9 @@ pub struct DocumentInfo {
     pub file_name: String,
     pub chunks: usize,
     pub model: String,
-    pub source_path: String,
+    /// Whether the original file path is known, so it can be re-indexed. The path itself is
+    /// never sent to the frontend.
+    pub can_reindex: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -174,8 +219,10 @@ mod tests {
                 name: "NVIDIA".into(),
                 provider: "openai".into(),
                 base_url: "https://x/v1".into(),
-                api_key: "k".into(),
                 model: "m".into(),
+                api_key: "legacy-never-written".into(),
+                has_api_key: true,
+                key_origin: "https://x".into(),
             }],
             embedding: EmbeddingConfig::default(),
             provider: None,
@@ -185,6 +232,7 @@ mod tests {
         };
         let json = serde_json::to_string(&s).unwrap();
         assert!(!json.contains("\"provider\":null"));
+        assert!(!json.contains("legacy-never-written"), "api_key must never be serialised");
         let back: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(back.profiles[0].name, "NVIDIA");
         assert!(back.provider.is_none());
