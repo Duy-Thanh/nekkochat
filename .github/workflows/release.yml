@@ -201,8 +201,21 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          path: artifacts
+          path: downloaded
           merge-multiple: true
+
+      # Artifacts with several paths keep their bundle subfolders (nsis/, msi/, deb/, ...),
+      # so collect every file into one flat folder
+      - name: Collect files
+        run: |
+          mkdir artifacts
+          find downloaded -type f -exec mv -n -t artifacts {} +
+          if [ -n "$(find downloaded -type f)" ]; then
+            echo "::error::Two artifacts have the same file name:"
+            find downloaded -type f
+            exit 1
+          fi
+          ls -l artifacts
 
       - name: Checksums
         working-directory: artifacts
