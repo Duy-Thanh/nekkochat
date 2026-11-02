@@ -1,5 +1,5 @@
-# Builds release bundles for Windows, Linux and Android and publishes them as the latest GitHub
-# release. Runs when:
+# Builds release bundles for Windows, Linux, macOS, Android and iOS and publishes them as the
+# latest GitHub release. Runs when:
 #   - a commit pushed to main has [release] in its message: the release is named after the build
 #     time in Vietnam time, as day.month.year_hour.minute.second (02.11.2026_14.30.05);
 #   - a tag (v0.1.0, ...) is pushed: the release is named after the tag;
@@ -10,6 +10,9 @@
 #   ANDROID_KEYSTORE_PASSWORD  the keystore password (also used as the key password)
 # The keystore must hold both identities, ec-384-identity and rsa-4096-identity: one APK is built
 # and signed with each, so users can pick either.
+#
+# macOS and iOS are built without an Apple Developer account: the macOS app is only ad-hoc signed
+# (not notarized), and the iOS .ipa is unsigned, for users who sign or sideload it themselves.
 
 name: Release
 
@@ -73,6 +76,14 @@ jobs:
               src-tauri/target/release/bundle/appimage/*.AppImage
               src-tauri/target/release/bundle/deb/*.deb
               src-tauri/target/release/bundle/rpm/*.rpm
+          # One universal app for Intel and Apple Silicon
+          - name: macOS
+            os: macos-latest
+            bundles: dmg
+            args: --target universal-apple-darwin
+            targets: aarch64-apple-darwin,x86_64-apple-darwin
+            out: |
+              src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -86,13 +97,19 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.targets || '' }}
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
 
       - run: bun install --frozen-lockfile
       - run: bun test spec
-      - run: bun tauri build --bundles ${{ matrix.bundles }}
+      # "-" is ad-hoc signing: no Apple account needed, but Apple Silicon refuses to run
+      # completely unsigned code. Ignored on other platforms.
+      - run: bun tauri build --bundles ${{ matrix.bundles }} ${{ matrix.args || '' }}
+        env:
+          APPLE_SIGNING_IDENTITY: "-"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -191,9 +208,66 @@ jobs:
           path: dist-android/*.apk
           if-no-files-found: error
 
+  ios:
+    name: iOS (unsigned)
+    needs: prepare
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: bun install --frozen-lockfile
+
+      # The Xcode project is not in the repository (it can only be generated on macOS)
+      - name: Generate the Xcode project
+        run: |
+          if [ ! -d src-tauri/gen/apple ]; then
+            bun tauri ios init --ci
+          fi
+
+      # Built for devices with code signing switched off; the Xcode project's build phase
+      # compiles the Rust library through `tauri ios xcode-script`
+      - name: Build the app
+        run: |
+          PROJECT=$(find src-tauri/gen/apple -maxdepth 1 -name '*.xcodeproj' | head -n 1)
+          SCHEME=$(xcodebuild -list -project "$PROJECT" | sed -n '/Schemes:/,$p' | grep -E '_iOS$' | head -n 1 | xargs)
+          echo "Building scheme $SCHEME of $PROJECT"
+          xcodebuild build \
+            -project "$PROJECT" -scheme "$SCHEME" -configuration release \
+            -sdk iphoneos -destination generic/platform=iOS -archs arm64 \
+            -derivedDataPath build/ios \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" | tail -n 50
+          test "${PIPESTATUS[0]}" -eq 0
+
+      # An .ipa is just the .app inside a Payload folder, zipped
+      - name: Package the .ipa
+        run: |
+          APP=$(find build/ios/Build/Products -maxdepth 2 -name '*.app' -path '*iphoneos*' | head -n 1)
+          if [ -z "$APP" ]; then
+            echo "::error::The build produced no .app"
+            exit 1
+          fi
+          mkdir -p ipa/Payload dist-ios
+          cp -R "$APP" ipa/Payload/
+          (cd ipa && zip -qry "../dist-ios/NekkoChat_${{ needs.prepare.outputs.tag }}_ios-unsigned.ipa" Payload)
+          ls -l dist-ios
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: iOS
+          path: dist-ios/*.ipa
+          if-no-files-found: error
+
   release:
     name: Release
-    needs: [prepare, desktop, android]
+    needs: [prepare, desktop, android, ios]
     if: needs.prepare.outputs.publish == 'true'
     runs-on: ubuntu-latest
     permissions:

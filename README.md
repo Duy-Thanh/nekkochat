@@ -1,6 +1,6 @@
 # NekkoChat
 
-A desktop and mobile chat client for LLMs, built with Tauri 2, SvelteKit and Rust. It runs on Windows, Linux and Android; macOS and iOS builds are planned.
+A desktop and mobile chat client for LLMs, built with Tauri 2, SvelteKit and Rust. It runs on Windows, Linux, macOS, Android and iOS.
 
 ## Features
 
@@ -24,9 +24,16 @@ Releases are on the [Releases](../../releases) page:
 |---|---|
 | Windows | `.exe` installer (NSIS) or `.msi` |
 | Linux | `.AppImage`, `.deb` or `.rpm` |
+| macOS | `.dmg` (one universal app for Intel and Apple Silicon) |
 | Android | `*_ecc-p384.apk` or `*_rsa-4096.apk` |
+| iOS | `*_ios-unsigned.ipa` |
 
 The two Android APKs are the same app, signed with different keys. Pick one and stay with it: Android only installs an update that is signed with the same key, so switching means uninstalling first. Check downloads against `SHA256SUMS.txt`.
+
+The macOS and iOS builds are not signed with an Apple Developer certificate:
+
+- **macOS:** the app is not notarized, so Gatekeeper blocks it the first time. Right-click the app and choose **Open**, or run `xattr -cr /Applications/NekkoChat.app`.
+- **iOS:** the `.ipa` has to be signed before it can be installed, for example with AltStore, Sideloadly or your own certificate.
 
 ## Development
 
@@ -55,7 +62,7 @@ The Android script needs the keystore `tauri-max-security.p12` in the project ro
 
 ## Releasing
 
-[`.github/workflows/release.yml`](.github/workflows/release.yml) builds Windows, Linux and both Android APKs. It then publishes them, with checksums, as the **latest** GitHub release.
+[`.github/workflows/release.yml`](.github/workflows/release.yml) builds Windows, Linux, macOS, both Android APKs and iOS. It then publishes them, with checksums, as the **latest** GitHub release.
 
 - Push a commit to `main` whose message contains `[release]`. The release and its tag are named after the build time in Vietnam time, as `day.month.year_hour.minute.second` (for example `02.11.2026_14.30.05`).
 - Pushing a tag (for example `v0.2.0`) also publishes a release, named after the tag.
