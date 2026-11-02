@@ -762,9 +762,7 @@
   >
     <div class="flex items-center justify-between">
       <div class="flex items-center gap-2">
-        <div class="w-7 h-7 rounded-lg bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 font-bold text-sm">
-          N
-        </div>
+        <img src="/logo.svg" alt="" class="w-7 h-7" draggable="false" />
         <h2 class="text-base font-bold tracking-tight text-zinc-100">NekkoChat</h2>
       </div>
       <button 
@@ -1001,9 +999,7 @@
 
       {#if currentMessages.length === 0}
         <div class="h-full flex flex-col items-center justify-center text-zinc-500 px-4 text-center">
-          <div class="w-14 h-14 mb-4 rounded-3xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400 text-2xl">
-            ✦
-          </div>
+          <img src="/logo.svg" alt="" class="w-16 h-16 mb-4" draggable="false" />
           <p class="text-lg font-semibold text-zinc-200">How can I help?</p>
           <p class="text-xs text-zinc-500 max-w-xs mt-1 leading-relaxed">Pick a role at the top, or attach documents to chat with them.</p>
           <div class="flex flex-wrap justify-center gap-2 mt-6 max-w-sm">
