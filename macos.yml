@@ -1,0 +1,20 @@
+services:
+  macos:
+    image: dockurr/macos:latest
+    container_name: macos-builder
+    environment:
+      VERSION: "15"
+      RAM_SIZE: "8G"
+      CPU_CORES: "4"
+      DISK_SIZE: "64G"
+    devices:
+      - /dev/kvm
+    cap_add:
+      - NET_ADMIN
+    ports:
+      - "2222:22"
+      - "8006:8006"
+    volumes:
+      - ./macos-storage:/storage
+      - ~/nekkochan/nekkochat
+    restart: always
