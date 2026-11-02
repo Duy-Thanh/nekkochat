@@ -1,8 +1,8 @@
-# Builds release bundles for Windows, Linux and Android and attaches them to a draft GitHub
+# Builds release bundles for Windows, Linux and Android and publishes them as the latest GitHub
 # release. Runs when:
-#   - a commit pushed to main has [release] in its message: the release is tagged v<version>,
-#     with the version taken from src-tauri/tauri.conf.json (bump it first);
-#   - a version tag (v0.1.0, ...) is pushed;
+#   - a commit pushed to main has [release] in its message: the release is named after the build
+#     time in Vietnam time, as day.month.year_hour.minute.second (02.11.2026_14.30.05);
+#   - a tag (v0.1.0, ...) is pushed: the release is named after the tag;
 #   - by hand from the Actions tab (build only, no release).
 #
 # Secrets needed for the Android job (Settings > Secrets and variables > Actions):
@@ -39,20 +39,14 @@ jobs:
       tag: ${{ steps.version.outputs.tag }}
       publish: ${{ steps.version.outputs.publish }}
     steps:
-      - uses: actions/checkout@v4
       - id: version
         run: |
           if [ "$GITHUB_REF_TYPE" = "tag" ]; then
             TAG="$GITHUB_REF_NAME"
             PUBLISH=true
           else
-            TAG="v$(jq -r .version src-tauri/tauri.conf.json)"
+            TAG=$(TZ=Asia/Ho_Chi_Minh date +%d.%m.%Y_%H.%M.%S)
             PUBLISH=$([ "$GITHUB_EVENT_NAME" = "push" ] && echo true || echo false)
-            # A [release] commit must not reuse the tag of an earlier release
-            if [ "$PUBLISH" = "true" ] && git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
-              echo "::error::Tag $TAG already exists. Bump the version in src-tauri/tauri.conf.json before a [release] commit."
-              exit 1
-            fi
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "publish=$PUBLISH" >> "$GITHUB_OUTPUT"
@@ -198,7 +192,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    name: Draft release
+    name: Release
     needs: [prepare, desktop, android]
     if: needs.prepare.outputs.publish == 'true'
     runs-on: ubuntu-latest
@@ -214,10 +208,10 @@ jobs:
         working-directory: artifacts
         run: sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
 
-      # A draft, so the release can be checked before it is published
       - uses: softprops/action-gh-release@v2
         with:
-          draft: true
+          name: ${{ needs.prepare.outputs.tag }}
+          make_latest: true
           tag_name: ${{ needs.prepare.outputs.tag }}
           target_commitish: ${{ github.sha }}
           generate_release_notes: true
