@@ -55,13 +55,15 @@ The Android script needs the keystore `tauri-max-security.p12` in the project ro
 
 ## Releasing
 
-[`.github/workflows/release.yml`](.github/workflows/release.yml) builds Windows, Linux and both Android APKs. It then creates a **draft** GitHub release with checksums.
+[`.github/workflows/release.yml`](.github/workflows/release.yml) builds Windows, Linux and both Android APKs. It then publishes them, with checksums, as the **latest** GitHub release.
 
-1. Bump `version` in `src-tauri/tauri.conf.json`.
-2. Push a commit to `main` whose message contains `[release]`. The release is tagged `v<version>`.
-   - Pushing a `v*` tag also works.
-   - Running the workflow by hand from the Actions tab only builds, without a release.
-3. Review the draft release and publish it.
+- Push a commit to `main` whose message contains `[release]`. The release and its tag are named after the build time in Vietnam time, as `day.month.year_hour.minute.second` (for example `02.11.2026_14.30.05`).
+- Pushing a tag (for example `v0.2.0`) also publishes a release, named after the tag.
+- Running the workflow by hand from the Actions tab only builds, without a release.
+
+The release is published right away, with no draft step. To pull a bad build, delete its release and tag on GitHub.
+
+The version shown in the app and in the desktop file names comes from `version` in `src-tauri/tauri.conf.json`. Keep it in `X.Y.Z` form, because the `.msi` installer only accepts numeric versions.
 
 The Android job needs the repository secrets `ANDROID_KEYSTORE_BASE64` (`base64 -w0 tauri-max-security.p12`) and `ANDROID_KEYSTORE_PASSWORD`. The keystore must contain both `ec-384-identity` and `rsa-4096-identity`.
 
