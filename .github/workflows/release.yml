@@ -128,11 +128,23 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+      # The action's default package list still includes "tools", which is no longer in the SDK
+      # repository and makes sdkmanager fail, so name the packages explicitly
       - uses: android-actions/setup-android@v3
-      - name: Install the NDK
+        with:
+          packages: platform-tools
+      # Newest stable NDK: pre-releases carry a suffix such as "-rc1" or "-beta1", so skip those
+      - name: Install the latest stable NDK
         run: |
-          sdkmanager --install "ndk;27.2.12479018"
-          echo "NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.2.12479018" >> "$GITHUB_ENV"
+          NDK=$(sdkmanager --list 2>/dev/null | grep -oE 'ndk;[0-9]+\.[0-9]+\.[0-9]+(\S*)' \
+            | grep -vE -- '-|rc|beta' | sed 's/^ndk;//' | sort -uV | tail -n 1)
+          if [ -z "$NDK" ]; then
+            echo "::error::Could not find a stable NDK in the SDK repository"
+            exit 1
+          fi
+          echo "Installing NDK $NDK"
+          sdkmanager --install "ndk;$NDK" >/dev/null
+          echo "NDK_HOME=$ANDROID_SDK_ROOT/ndk/$NDK" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
