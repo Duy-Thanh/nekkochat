@@ -61,3 +61,8 @@ opt-level = 1
 # Tauri does not perform, and reqwest panics without it), so there the app ships Mozilla's roots.
 [target.'cfg(target_os = "android")'.dependencies]
 webpki-root-certs = "1.0.11"
+
+# keyring's default store does not support iOS (the app falls back to the encrypted vault there,
+# as on Android), but its Apple backend refuses to compile on iOS without the `protected` feature.
+[target.'cfg(target_os = "ios")'.dependencies]
+apple-native-keyring-store = { version = "1", features = ["protected"] }
