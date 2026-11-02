@@ -1,5 +1,9 @@
 # Builds release bundles for Windows, Linux and Android and attaches them to a draft GitHub
-# release. Runs when a version tag (v0.1.0, ...) is pushed, or by hand from the Actions tab.
+# release. Runs when:
+#   - a commit pushed to main has [release] in its message: the release is tagged v<version>,
+#     with the version taken from src-tauri/tauri.conf.json (bump it first);
+#   - a version tag (v0.1.0, ...) is pushed;
+#   - by hand from the Actions tab (build only, no release).
 #
 # Secrets needed for the Android job (Settings > Secrets and variables > Actions):
 #   ANDROID_KEYSTORE_BASE64    base64 of tauri-max-security.p12   (base64 -w0 tauri-max-security.p12)
@@ -11,6 +15,7 @@ name: Release
 
 on:
   push:
+    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
 
@@ -22,8 +27,40 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Decides whether this run builds at all, and the tag the release gets
+  prepare:
+    name: Prepare
+    if: >-
+      github.event_name != 'push' ||
+      startsWith(github.ref, 'refs/tags/') ||
+      contains(github.event.head_commit.message, '[release]')
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      publish: ${{ steps.version.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            TAG="$GITHUB_REF_NAME"
+            PUBLISH=true
+          else
+            TAG="v$(jq -r .version src-tauri/tauri.conf.json)"
+            PUBLISH=$([ "$GITHUB_EVENT_NAME" = "push" ] && echo true || echo false)
+            # A [release] commit must not reuse the tag of an earlier release
+            if [ "$PUBLISH" = "true" ] && git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
+              echo "::error::Tag $TAG already exists. Bump the version in src-tauri/tauri.conf.json before a [release] commit."
+              exit 1
+            fi
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "publish=$PUBLISH" >> "$GITHUB_OUTPUT"
+          echo "Building $TAG (publish: $PUBLISH)"
+
   desktop:
     name: ${{ matrix.name }}
+    needs: prepare
     strategy:
       fail-fast: false
       matrix:
@@ -71,6 +108,7 @@ jobs:
 
   android:
     name: Android (${{ matrix.label }})
+    needs: prepare
     strategy:
       fail-fast: false
       matrix:
@@ -139,7 +177,7 @@ jobs:
           APKSIGNER=$(find "$ANDROID_SDK_ROOT/build-tools" -name apksigner -type f | sort -V | tail -n 1)
           "$APKSIGNER" verify --print-certs "$APK"
           mkdir -p dist-android
-          mv "$APK" "dist-android/NekkoChat_${GITHUB_REF_NAME//\//-}_android-universal_${{ matrix.suffix }}.apk"
+          mv "$APK" "dist-android/NekkoChat_${{ needs.prepare.outputs.tag }}_android-universal_${{ matrix.suffix }}.apk"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -149,8 +187,8 @@ jobs:
 
   release:
     name: Draft release
-    needs: [desktop, android]
-    if: startsWith(github.ref, 'refs/tags/')
+    needs: [prepare, desktop, android]
+    if: needs.prepare.outputs.publish == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -168,5 +206,7 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           draft: true
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           generate_release_notes: true
           files: artifacts/*
