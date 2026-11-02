@@ -1015,10 +1015,16 @@ async fn stream_chat_command(
 pub fn run() {
     #[cfg(target_os = "linux")]
     {
-        // SAFETY: called before any other thread is created
-        unsafe {
-            std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
-            std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+        // WebKitGTK's GPU rendering freezes / goes white on the proprietary NVIDIA driver, so
+        // fall back to software rendering there only: elsewhere it makes the UI noticeably slow.
+        // A value the user already set is left alone.
+        if Path::new("/proc/driver/nvidia").exists() {
+            for var in ["WEBKIT_DISABLE_COMPOSITING_MODE", "WEBKIT_DISABLE_DMABUF_RENDERER"] {
+                if std::env::var_os(var).is_none() {
+                    // SAFETY: called before any other thread is created
+                    unsafe { std::env::set_var(var, "1") };
+                }
+            }
         }
     }
 

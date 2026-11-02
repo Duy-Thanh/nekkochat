@@ -37,9 +37,13 @@
     return new Promise((resolve) => {
       // SvelteKit waits for this promise before it swaps the page. If the browser never runs the
       // transition callback (no frame is being drawn, the window is hidden), go on without the
-      // animation rather than leave the old page on screen.
-      const giveUp = setTimeout(resolve, 400);
-      document.startViewTransition(async () => {
+      // animation rather than leave the old page on screen, and skip the transition so it does
+      // not keep rendering suppressed.
+      const giveUp = setTimeout(() => {
+        transition.skipTransition();
+        resolve();
+      }, 400);
+      const transition = document.startViewTransition(async () => {
         clearTimeout(giveUp);
         resolve();
         await navigation.complete;
