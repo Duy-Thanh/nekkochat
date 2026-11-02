@@ -232,8 +232,31 @@ jobs:
             bun tauri ios init --ci
           fi
 
-      # Built for devices with code signing switched off; the Xcode project's build phase
-      # compiles the Rust library through `tauri ios xcode-script`
+      # `tauri ios build` insists on signing, and the Xcode project's "Build Rust Code" phase
+      # (`tauri ios xcode-script`) only works while `tauri ios build` is running. So build the
+      # frontend and the Rust library here, put the library where Xcode links it from, and turn
+      # that phase into a no-op.
+      - name: Build the Rust library
+        env:
+          IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+        run: |
+          bun run build
+          cargo build --manifest-path src-tauri/Cargo.toml --release --lib \
+            --target aarch64-apple-ios --features tauri/custom-protocol
+          mkdir -p src-tauri/gen/apple/Externals/arm64/release
+          cp src-tauri/target/aarch64-apple-ios/release/libnekkochat_lib.a \
+            src-tauri/gen/apple/Externals/arm64/release/libapp.a
+
+      - name: Skip the Xcode Rust build phase
+        run: |
+          PBX=$(find src-tauri/gen/apple -maxdepth 2 -name project.pbxproj -path '*.xcodeproj/*' | head -n 1)
+          perl -0pi -e 's/shellScript = "(?:[^"\\]|\\.)*tauri ios xcode-script(?:[^"\\]|\\.)*";/shellScript = "exit 0";/g' "$PBX"
+          if grep -q "tauri ios xcode-script" "$PBX"; then
+            echo "::error::Could not disable the Build Rust Code phase in $PBX"
+            exit 1
+          fi
+
+      # Built for devices with code signing switched off
       - name: Build the app
         run: |
           PROJECT=$(find src-tauri/gen/apple -maxdepth 1 -name '*.xcodeproj' | head -n 1)
